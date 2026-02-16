@@ -27,6 +27,7 @@ python3 train_offline.py
 ```
 
 Running without flags opens a simple interactive console setup (press Enter to keep defaults).
+You can also type `default` at the very first prompt to skip all setup instantly.
 
 Useful options:
 

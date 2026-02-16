@@ -115,7 +115,8 @@ def _prompt_int(label: str, default: int, choices: tuple[int, ...] | None = None
     while True:
         options = f" {choices}" if choices else ""
         raw = input(f"{label}{options} [{default}]: ").strip()
-        if raw == "":
+        raw_l = raw.lower()
+        if raw == "" or raw_l == "default":
             return default
         try:
             value = int(raw)
@@ -134,7 +135,8 @@ def _prompt_int(label: str, default: int, choices: tuple[int, ...] | None = None
 def _prompt_float(label: str, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
     while True:
         raw = input(f"{label} [{default}]: ").strip()
-        if raw == "":
+        raw_l = raw.lower()
+        if raw == "" or raw_l == "default":
             return default
         try:
             value = float(raw)
@@ -153,12 +155,13 @@ def _prompt_float(label: str, default: float, min_value: float | None = None, ma
 def _prompt_bool(label: str, default: bool) -> bool:
     default_text = "Y/n" if default else "y/N"
     while True:
-        raw = input(f"{label} ({default_text}): ").strip().lower()
-        if raw == "":
+        raw = input(f"{label} ({default_text}): ").strip()
+        raw_l = raw.lower()
+        if raw == "" or raw_l == "default":
             return default
-        if raw in {"y", "yes"}:
+        if raw_l in {"y", "yes"}:
             return True
-        if raw in {"n", "no"}:
+        if raw_l in {"n", "no"}:
             return False
         print("Enter y or n.")
 
@@ -166,6 +169,11 @@ def _prompt_bool(label: str, default: bool) -> bool:
 def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
     print("\nSnake offline training setup")
     print("Press Enter to keep defaults.\n")
+    print("Tip: type 'default' at the first prompt to skip all setup.\n")
+
+    first = input("Quick start: press Enter to configure, or type 'default' to run with all defaults: ").strip().lower()
+    if first == "default":
+        return TrainConfig(), None, None, True
 
     board_size = _prompt_int("Board size", 20, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", 3, choices=APPLE_CHOICES)

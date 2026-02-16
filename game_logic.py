@@ -136,7 +136,8 @@ class SnakeGame:
         """Keep spawning apples until configured count is reached or board is full."""
         target = min(self.config.apples, len(self.free_tiles))
         while len(self.apples) < target and self.free_tiles:
-            pos = random.sample(self.free_tiles, 1)[0]
+            # Python 3.13 random.sample requires a sequence (set is not accepted).
+            pos = random.choice(tuple(self.free_tiles))
             self.apples.add(pos)
             self.free_tiles.discard(pos)
 
