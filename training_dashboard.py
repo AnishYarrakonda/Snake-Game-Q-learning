@@ -592,7 +592,11 @@ class TrainingDashboard:
 
                 elif mtype == "done":
                     self.worker = None
-                    self.status_var.set(msg.get("text", "Finished"))
+                    done_text = msg.get("text", "Finished")
+                    self.status_var.set(done_text)
+                    if msg.get("ask_save", False):
+                        if messagebox.askyesno("Save Model", f"{done_text}\n\nSave model now?"):
+                            self.save_model()
 
                 elif mtype == "error":
                     self.worker = None
@@ -680,7 +684,7 @@ class TrainingDashboard:
                     )
 
                 done_text = "Training stopped" if self.stop_event.is_set() else "Training complete"
-                self.msg_queue.put({"type": "done", "text": done_text})
+                self.msg_queue.put({"type": "done", "text": done_text, "ask_save": True})
             except Exception as exc:
                 self.msg_queue.put({"type": "error", "text": str(exc)})
 
@@ -751,7 +755,7 @@ class TrainingDashboard:
                     )
 
                 done_text = "Watch stopped" if self.stop_event.is_set() else "Watch complete"
-                self.msg_queue.put({"type": "done", "text": done_text})
+                self.msg_queue.put({"type": "done", "text": done_text, "ask_save": True})
             except Exception as exc:
                 self.msg_queue.put({"type": "error", "text": str(exc)})
             finally:

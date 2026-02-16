@@ -159,8 +159,8 @@ def train_offline(
             print(row)
             print()
 
-    out_path = save_path or default_model_path(cfg.board_size, cfg.state_encoding)
-    agent.save(out_path)
+    if save_path:
+        agent.save(save_path)
 
     if show_plot:
         _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
@@ -260,7 +260,7 @@ def _prompt_bool(label: str, default: bool) -> bool:
         print("Enter y or n.")
 
 
-def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
+def prompt_train_config() -> tuple[TrainConfig, str | None, bool]:
     default_cfg = TrainConfig()
     print("\nSnake offline training setup")
     print("Press Enter to keep defaults.\n")
@@ -269,7 +269,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
     first = input("Quick start: press Enter to configure, or type 'default' to run with all defaults: ").strip().lower()
     if first == "default":
         # Default quick-start prefers speed: no live plotting.
-        return default_cfg, None, None, False
+        return default_cfg, None, False
 
     board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
@@ -288,8 +288,6 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
     show_plot = _prompt_bool("Show live matplotlib plot", False)
 
     load_raw = input("Model to load (.pt), blank for none: ").strip()
-    save_raw = input("Model save path (.pt), blank for default: ").strip()
-
     cfg = TrainConfig(
         board_size=board_size,
         apples=apples,
@@ -308,15 +306,34 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
         state_encoding=default_cfg.state_encoding,
     )
     load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
-    save_path = None if save_raw == "" or save_raw.lower() == "default" else save_raw
-    return cfg, load_path, save_path, show_plot
+    return cfg, load_path, show_plot
+
+
+def _prompt_save_after_training(agent: SnakeDQNAgent, cfg: TrainConfig) -> None:
+    while True:
+        choice = input("\nSave model now? (y/n): ").strip().lower()
+        if choice in {"y", "yes"}:
+            default_path = default_model_path(cfg.board_size, cfg.state_encoding)
+            raw = input(f"Save path [{default_path}]: ").strip()
+            path = default_path if raw == "" else raw
+            try:
+                agent.save(path)
+                print(f"Saved model to: {path}")
+            except Exception as exc:
+                print(f"Save failed: {exc}")
+            return
+        if choice in {"n", "no", ""}:
+            print("Model not saved.")
+            return
+        print("Enter y or n.")
 
 
 def run_offline_training_cli() -> None:
     args = parse_args()
     interactive = args.interactive or len(sys.argv) == 1
     if interactive:
-        cfg, load_path, save_path, show_plot = prompt_train_config()
+        cfg, load_path, show_plot = prompt_train_config()
+        save_path = None
     else:
         cfg = TrainConfig(
             board_size=args.board_size,
@@ -339,7 +356,10 @@ def run_offline_training_cli() -> None:
         save_path = args.save if args.save else None
         show_plot = not args.no_plot
 
-    train_offline(cfg, load_path=load_path, save_path=save_path, show_plot=show_plot)
+    agent, _, _ = train_offline(cfg, load_path=load_path, save_path=save_path, show_plot=show_plot)
+
+    if interactive and not save_path:
+        _prompt_save_after_training(agent, cfg)
 
 
 if __name__ == "__main__":
