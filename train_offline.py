@@ -14,6 +14,7 @@ os.environ.setdefault("MPLCONFIGDIR", LOCAL_MPLCONFIG)
 
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import deque
 
 try:
     from .agent import SnakeDQNAgent
@@ -21,7 +22,7 @@ try:
         APPLE_CHOICES,
         BOARD_SIZES,
         TrainConfig,
-        chunked_median,
+        chunked_mean,
         default_model_path,
         make_game,
         run_episode,
@@ -32,7 +33,7 @@ except ImportError:
         APPLE_CHOICES,
         BOARD_SIZES,
         TrainConfig,
-        chunked_median,
+        chunked_mean,
         default_model_path,
         make_game,
         run_episode,
@@ -41,21 +42,21 @@ except ImportError:
 
 def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[float]) -> None: #type: ignore
     ax_trend.clear()
-    ax_trend.set_title("Training Trend (Median per 25 Episodes)")
+    ax_trend.set_title("Training Trend (Average per 10 Episodes)")
     ax_trend.set_xlabel("Episode")
     ax_trend.set_ylabel("Length")
     ax_trend.grid(alpha=0.25)
 
-    x25, median25 = chunked_median(scores, chunk_size=25)
-    if x25.size > 0:
+    x10, mean10 = chunked_mean(scores, chunk_size=10)
+    if x10.size > 0:
         ax_trend.plot(
-            x25,
-            median25,
+            x10,
+            mean10,
             color="#1f77b4",
             linewidth=2.2,
             marker="o",
             markersize=3,
-            label="Median length (per 25 episodes)",
+            label="Average length (per 10 episodes)",
         )
     handles, labels = ax_trend.get_legend_handles_labels()
     if handles:
@@ -94,7 +95,9 @@ def train_offline(
         agent.load(load_path)
 
     scores: list[float] = []
-    med25_scores: list[float] = []
+    avg10_scores: list[float] = []
+    recent_10: deque[float] = deque(maxlen=10)
+    recent_50: deque[float] = deque(maxlen=50)
 
     if show_plot:
         plt.ion()
@@ -109,27 +112,34 @@ def train_offline(
 
         score, _, _ = run_episode(agent, cfg, train=True, stop_flag=stop_flag, game=episode_game)
         scores.append(float(score))
-        med25 = float(np.median(scores[-25:]))
-        med25_scores.append(med25)
+        recent_10.append(float(score))
+        recent_50.append(float(score))
+        avg10 = float(np.mean(recent_10))
+        avg10_scores.append(avg10)
 
         agent.decay_epsilon()
 
         if episode_callback:
-            episode_callback(episode, float(score), med25, float(agent.epsilon))
+            episode_callback(episode, float(score), avg10, float(agent.epsilon))
 
-        if show_plot and (episode == 1 or episode % 25 == 0 or episode == cfg.episodes):
+        if show_plot and (episode == 1 or episode % 10 == 0 or episode == cfg.episodes):
             _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
             fig.canvas.draw_idle() #type: ignore
             fig.canvas.flush_events() #type: ignore
             plt.pause(0.001)
 
         if episode % 50 == 0:
+            avg50 = float(np.mean(recent_50))
+            median50 = float(np.median(recent_50))
+            max50 = float(np.max(recent_50))
+            range_start = episode - len(recent_50) + 1
             print(
-                f"Episode {episode}/{cfg.episodes} | "
-                f"Length: {score:.0f} | Median25: {med25:.2f} | Epsilon: {agent.epsilon:.4f}"
+                f"Episodes {range_start}-{episode}/{cfg.episodes} | "
+                f"Last: {score:.0f} | Avg50: {avg50:.2f} | Median50: {median50:.2f} | "
+                f"Max50: {max50:.0f} | Epsilon: {agent.epsilon:.4f}"
             )
 
-    out_path = save_path or default_model_path(cfg.board_size)
+    out_path = save_path or default_model_path(cfg.board_size, cfg.state_encoding)
     agent.save(out_path)
 
     if show_plot:
@@ -137,7 +147,7 @@ def train_offline(
         plt.ioff()
         plt.show()
 
-    return agent, scores, med25_scores
+    return agent, scores, avg10_scores
 
 
 def parse_args() -> argparse.Namespace:
@@ -150,6 +160,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon-decay", type=float, default=defaults.epsilon_decay)
     parser.add_argument("--epsilon-min", type=float, default=defaults.epsilon_min)
     parser.add_argument("--lr", type=float, default=defaults.lr)
+    parser.add_argument(
+        "--state-encoding",
+        type=str,
+        default=defaults.state_encoding,
+        choices=("compact11", "board"),
+        help="State representation: compact11 is usually faster to learn than board.",
+    )
     parser.add_argument("--load", type=str, default="")
     parser.add_argument("--save", type=str, default="")
     parser.add_argument("--no-plot", action="store_true", help="Disable matplotlib live plot")
@@ -250,6 +267,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
         epsilon_min=epsilon_min,
         lr=lr,
         distance_reward_shaping=use_distance_shaping,
+        state_encoding=default_cfg.state_encoding,
     )
     load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
     save_path = None if save_raw == "" or save_raw.lower() == "default" else save_raw
@@ -271,6 +289,7 @@ def run_offline_training_cli() -> None:
             epsilon_min=args.epsilon_min,
             lr=args.lr,
             distance_reward_shaping=not args.no_distance_shaping,
+            state_encoding=args.state_encoding,
         )
         load_path = args.load if args.load else None
         save_path = args.save if args.save else None

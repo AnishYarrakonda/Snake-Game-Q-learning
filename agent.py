@@ -10,9 +10,9 @@ from torch import nn
 import torch.nn.functional as F
 
 try:
-    from .utils import ACTIONS, REVERSE_DIRECTION, TrainConfig
+    from .utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, TrainConfig
 except ImportError:
-    from utils import ACTIONS, REVERSE_DIRECTION, TrainConfig
+    from utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, TrainConfig
 
 VALID_ACTIONS_BY_DIRECTION = {
     direction: [idx for idx, action in enumerate(ACTIONS) if action != REVERSE_DIRECTION[direction]]
@@ -23,14 +23,14 @@ VALID_ACTIONS_BY_DIRECTION = {
 class QNetwork(nn.Module):
     """Feed-forward network where input is the entire flattened board."""
 
-    def __init__(self, input_size: int, hidden_dim: int = 256) -> None:
+    def __init__(self, input_size: int, hidden_dim: int = 256, output_size: int = 3) -> None:
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_size, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, len(ACTIONS)),
+            nn.Linear(hidden_dim, output_size),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -42,7 +42,9 @@ class SnakeDQNAgent:
 
     def __init__(self, cfg: TrainConfig, device: torch.device | None = None) -> None:
         self.cfg = cfg
-        self.input_size = cfg.board_size * cfg.board_size
+        self.uses_relative_actions = cfg.state_encoding == "compact11"
+        self.input_size = 11 if cfg.state_encoding == "compact11" else cfg.board_size * cfg.board_size
+        self.action_space = RELATIVE_ACTIONS if self.uses_relative_actions else ACTIONS
         if device is not None:
             self.device = device
         elif torch.cuda.is_available():
@@ -52,8 +54,16 @@ class SnakeDQNAgent:
         else:
             self.device = torch.device("cpu")
 
-        self.policy_net = QNetwork(self.input_size, hidden_dim=cfg.hidden_dim).to(self.device)
-        self.target_net = QNetwork(self.input_size, hidden_dim=cfg.hidden_dim).to(self.device)
+        self.policy_net = QNetwork(
+            self.input_size,
+            hidden_dim=cfg.hidden_dim,
+            output_size=len(self.action_space),
+        ).to(self.device)
+        self.target_net = QNetwork(
+            self.input_size,
+            hidden_dim=cfg.hidden_dim,
+            output_size=len(self.action_space),
+        ).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -64,13 +74,24 @@ class SnakeDQNAgent:
         self.learn_steps = 0
 
     def valid_action_indices(self, current_direction: str) -> list[int]:
+        if self.uses_relative_actions:
+            return [0, 1, 2]
         return VALID_ACTIONS_BY_DIRECTION[current_direction]
+
+    def action_to_direction(self, current_direction: str, action_idx: int) -> str:
+        if not self.uses_relative_actions:
+            return ACTIONS[action_idx]
+        if action_idx == 0:
+            return current_direction
+        if action_idx == 1:
+            return TURN_RIGHT[current_direction]
+        return TURN_LEFT[current_direction]
 
     def select_action(self, state: np.ndarray, valid_indices: list[int], explore: bool = True) -> int:
         if explore and random.random() < self.epsilon:
             return random.choice(valid_indices)
 
-        state_t = torch.from_numpy(state).to(self.device).unsqueeze(0)
+        state_t = torch.from_numpy(state).to(device=self.device, dtype=torch.float32).unsqueeze(0)
         with torch.inference_mode():
             q_values = self.policy_net(state_t).squeeze(0)
 
@@ -83,17 +104,18 @@ class SnakeDQNAgent:
         self.memory.append((state, action, reward, next_state, done))
 
     def train_step(self) -> float | None:
-        if len(self.memory) < self.cfg.batch_size:
+        if not self.memory:
             return None
 
-        batch = random.sample(self.memory, self.cfg.batch_size)
+        sample_size = min(len(self.memory), self.cfg.batch_size)
+        batch = random.sample(self.memory, sample_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
         states_t = torch.from_numpy(np.stack(states).astype(np.float32, copy=False)).to(self.device)
-        actions_t = torch.from_numpy(np.fromiter(actions, dtype=np.int64, count=self.cfg.batch_size)).to(self.device)
-        rewards_t = torch.from_numpy(np.fromiter(rewards, dtype=np.float32, count=self.cfg.batch_size)).to(self.device)
+        actions_t = torch.from_numpy(np.fromiter(actions, dtype=np.int64, count=sample_size)).to(self.device)
+        rewards_t = torch.from_numpy(np.fromiter(rewards, dtype=np.float32, count=sample_size)).to(self.device)
         next_states_t = torch.from_numpy(np.stack(next_states).astype(np.float32, copy=False)).to(self.device)
-        dones_t = torch.from_numpy(np.fromiter(dones, dtype=np.float32, count=self.cfg.batch_size)).to(self.device)
+        dones_t = torch.from_numpy(np.fromiter(dones, dtype=np.float32, count=sample_size)).to(self.device)
 
         current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
@@ -122,6 +144,8 @@ class SnakeDQNAgent:
     def save(self, path: str) -> None:
         payload = {
             "board_size": self.cfg.board_size,
+            "state_encoding": self.cfg.state_encoding,
+            "action_space_size": len(self.action_space),
             "hidden_dim": self.cfg.hidden_dim,
             "state_dict": self.policy_net.state_dict(),
             "epsilon": self.epsilon,
@@ -137,6 +161,18 @@ class SnakeDQNAgent:
             raise ValueError(
                 f"Model board size ({board_size}) does not match current board size ({self.cfg.board_size})."
             )
+        payload_state_encoding = str(payload.get("state_encoding", payload.get("cfg", {}).get("state_encoding", "board")))
+        if payload_state_encoding != self.cfg.state_encoding:
+            raise ValueError(
+                f"Model state encoding ({payload_state_encoding}) does not match current state encoding "
+                f"({self.cfg.state_encoding})."
+            )
+        payload_action_space_size = int(payload.get("action_space_size", len(ACTIONS)))
+        if payload_action_space_size != len(self.action_space):
+            raise ValueError(
+                f"Model action space ({payload_action_space_size}) does not match current action space "
+                f"({len(self.action_space)})."
+            )
 
         self.policy_net.load_state_dict(payload["state_dict"])
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -149,5 +185,7 @@ class SnakeDQNAgent:
         payload = torch.load(path, map_location="cpu")
         return {
             "board_size": int(payload.get("board_size", 20)),
+            "state_encoding": payload.get("state_encoding", payload.get("cfg", {}).get("state_encoding", "board")),
+            "action_space_size": int(payload.get("action_space_size", len(ACTIONS))),
             "cfg": payload.get("cfg", {}),
         }

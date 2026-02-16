@@ -34,18 +34,21 @@ Quick-start `default` runs with plotting disabled for faster training.
 Useful options:
 
 ```bash
-python3 train_offline.py --board-size 20 --apples 3 --episodes 3000 --max-steps 1200
+python3 train_offline.py --board-size 20 --apples 3 --episodes 3000 --max-steps 600
 python3 train_offline.py --no-plot
+python3 train_offline.py --state-encoding compact11
 python3 train_offline.py --no-distance-shaping
-python3 train_offline.py --load models/snake_dqn_20x20.pt --save models/my_model.pt
+python3 train_offline.py --load models/snake_dqn_compact11_20x20.pt --save models/my_model.pt
 ```
 
-This trains the model and saves a `.pt` file (default: `models/snake_dqn_<board>x<board>.pt`).
+This trains the model and saves a `.pt` file
+(default: `models/snake_dqn_compact11_<board>x<board>.pt`).
+`compact11` is the Patrick-style state representation and is the default.
 
 Plot behavior:
-- top subplot: median length per 25 episodes (simple line)
+- top subplot: average length per 10 episodes (simple line)
 - bottom subplot: histogram of episode lengths (distribution)
-- console status uses rolling `Median25`
+- console prints every 50 episodes with episode range, Avg50, Median50, Max50, and epsilon
 - episode ends as a win when the board is fully filled by the snake
 
 ### 2) Watch training / watch model play (dashboard)

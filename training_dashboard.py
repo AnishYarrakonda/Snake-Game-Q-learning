@@ -27,7 +27,7 @@ try:
         BOARD_SIZES,
         MODELS_DIR,
         TrainConfig,
-        chunked_median,
+        chunked_mean,
         default_model_path,
         make_game,
         run_episode,
@@ -40,7 +40,7 @@ except ImportError:
         BOARD_SIZES,
         MODELS_DIR,
         TrainConfig,
-        chunked_median,
+        chunked_mean,
         default_model_path,
         make_game,
         run_episode,
@@ -182,7 +182,7 @@ class TrainingDashboard:
         )
 
     def _sync_agent_to_cfg(self, cfg: TrainConfig) -> None:
-        if cfg.board_size != self.cfg.board_size:
+        if cfg.board_size != self.cfg.board_size or cfg.state_encoding != self.cfg.state_encoding:
             self.cfg = cfg
             self.agent = SnakeDQNAgent(cfg)
             return
@@ -239,7 +239,7 @@ class TrainingDashboard:
 
     def _update_plot(self) -> None:
         self.ax_trend.clear()
-        self.ax_trend.set_title("Training Trend (Median per 25 Episodes)")
+        self.ax_trend.set_title("Training Trend (Average per 10 Episodes)")
         self.ax_trend.set_xlabel("Episode")
         self.ax_trend.set_ylabel("Length")
         self.ax_trend.grid(alpha=0.25)
@@ -254,16 +254,16 @@ class TrainingDashboard:
             self.plot_canvas.draw_idle()
             return
 
-        x25, median25 = chunked_median(self.scores, chunk_size=25)
-        if x25.size > 0:
+        x10, mean10 = chunked_mean(self.scores, chunk_size=10)
+        if x10.size > 0:
             self.ax_trend.plot(
-                x25,
-                median25,
+                x10,
+                mean10,
                 color="#1f77b4",
                 linewidth=2.2,
                 marker="o",
                 markersize=3,
-                label="Median length (per 25 episodes)",
+                label="Average length (per 10 episodes)",
             )
         handles, labels = self.ax_trend.get_legend_handles_labels()
         if handles:
@@ -301,7 +301,7 @@ class TrainingDashboard:
                     self.scores.append(score)
                     self._update_plot()
                     self.status_var.set(
-                        f"Episode {episode}/{total} | Length: {score:.0f} | Median25: {avg:.2f} | Epsilon: {epsilon:.4f}"
+                        f"Episode {episode}/{total} | Length: {score:.0f} | Avg10: {avg:.2f} | Epsilon: {epsilon:.4f}"
                     )
 
                 elif mtype == "done":
@@ -342,7 +342,7 @@ class TrainingDashboard:
 
         def worker() -> None:
             try:
-                recent_scores: deque[float] = deque(maxlen=25)
+                recent_scores: deque[float] = deque(maxlen=10)
                 episode_game = make_game(cfg)
 
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
@@ -374,7 +374,7 @@ class TrainingDashboard:
                     self.agent.decay_epsilon()
 
                     recent_scores.append(float(score))
-                    avg = float(np.median(recent_scores))
+                    avg = float(np.mean(recent_scores))
 
                     self.msg_queue.put(
                         {
@@ -410,7 +410,7 @@ class TrainingDashboard:
                 watch_cfg = replace(cfg, step_delay=0.05)
                 self.agent.epsilon = 0.0
 
-                recent_scores: deque[float] = deque(maxlen=25)
+                recent_scores: deque[float] = deque(maxlen=10)
                 max_watch_episodes = 100000
                 episode_game = make_game(watch_cfg)
 
@@ -442,7 +442,7 @@ class TrainingDashboard:
                     )
 
                     recent_scores.append(float(score))
-                    avg = float(np.median(recent_scores))
+                    avg = float(np.mean(recent_scores))
 
                     self.msg_queue.put(
                         {
@@ -469,7 +469,7 @@ class TrainingDashboard:
         self.status_var.set("Stopping...")
 
     def save_model(self) -> None:
-        default_name = os.path.basename(default_model_path(self.cfg.board_size))
+        default_name = os.path.basename(default_model_path(self.cfg.board_size, self.cfg.state_encoding))
         path = filedialog.asksaveasfilename(
             title="Save model",
             initialdir=MODELS_DIR,
@@ -504,6 +504,9 @@ class TrainingDashboard:
             self.board_var.set(str(board_size))
 
             cfg_data = metadata.get("cfg", {})
+            state_encoding = str(metadata.get("state_encoding", cfg_data.get("state_encoding", self.cfg.state_encoding)))
+            if state_encoding not in {"compact11", "board"}:
+                raise ValueError(f"Unsupported state encoding in model: {state_encoding}")
             apples = int(cfg_data.get("apples", self.apple_var.get()))
             if apples in APPLE_CHOICES:
                 self.apple_var.set(str(apples))
@@ -516,6 +519,7 @@ class TrainingDashboard:
                 self.lr_var.set(str(cfg_data["lr"]))
 
             cfg = self._read_cfg_from_ui()
+            cfg = replace(cfg, state_encoding=state_encoding)
             self._sync_agent_to_cfg(cfg)
             self.agent.load(path)
 
