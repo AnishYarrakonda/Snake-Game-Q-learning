@@ -86,6 +86,8 @@ def train_offline(
     load_path: str | None = None,
     save_path: str | None = None,
     show_plot: bool = True,
+    print_every: int = 25,
+    show_final_trend_plot: bool = True,
     stop_flag: threading.Event | None = None,
     episode_callback: Callable[[int, float, float, float], None] | None = None,
 ) -> tuple[SnakeDQNAgent, list[float], list[float]]:
@@ -97,8 +99,11 @@ def train_offline(
     scores: list[float] = []
     avg10_scores: list[float] = []
     recent_10: deque[float] = deque(maxlen=10)
-    log_chunk_size = 25
+    log_chunk_size = max(1, int(print_every))
     recent_chunk: deque[float] = deque(maxlen=log_chunk_size)
+    chunk_episode_ends: list[int] = []
+    chunk_avg_scores: list[float] = []
+    chunk_median_scores: list[float] = []
 
     print(f"\nUsing device: {agent.device}\n")
 
@@ -146,6 +151,9 @@ def train_offline(
             avg_chunk = float(np.mean(recent_chunk))
             median_chunk = float(np.median(recent_chunk))
             max_chunk = float(np.max(recent_chunk))
+            chunk_episode_ends.append(episode)
+            chunk_avg_scores.append(avg_chunk)
+            chunk_median_scores.append(median_chunk)
             range_start = episode - len(recent_chunk) + 1
             episode_label = f"{range_start}-{episode}/{cfg.episodes}"
             row = (
@@ -165,6 +173,33 @@ def train_offline(
     if show_plot:
         _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
         plt.ioff()
+        plt.show()
+    elif show_final_trend_plot and chunk_episode_ends:
+        plt.figure(figsize=(9, 5))
+        plt.plot(
+            chunk_episode_ends,
+            chunk_avg_scores,
+            color="#1f77b4",
+            linewidth=2.0,
+            marker="o",
+            markersize=4,
+            label=f"Average (per {log_chunk_size})",
+        )
+        plt.plot(
+            chunk_episode_ends,
+            chunk_median_scores,
+            color="#ff7f0e",
+            linewidth=2.0,
+            marker="s",
+            markersize=4,
+            label=f"Median (per {log_chunk_size})",
+        )
+        plt.title("Training Plateau Trend")
+        plt.xlabel("Episode")
+        plt.ylabel("Length")
+        plt.grid(alpha=0.25)
+        plt.legend(loc="upper left")
+        plt.tight_layout()
         plt.show()
 
     return agent, scores, avg10_scores
@@ -195,7 +230,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--load", type=str, default="")
     parser.add_argument("--save", type=str, default="")
+    parser.add_argument(
+        "--print-every",
+        type=int,
+        default=25,
+        help="Print training stats every N episodes (also used for chunk average/median trend).",
+    )
     parser.add_argument("--no-plot", action="store_true", help="Disable matplotlib live plot")
+    parser.add_argument(
+        "--no-final-trend-plot",
+        action="store_true",
+        help="Disable end-of-training average/median trend plot when live plot is off.",
+    )
     parser.add_argument(
         "--no-distance-shaping",
         action="store_true",
@@ -260,7 +306,7 @@ def _prompt_bool(label: str, default: bool) -> bool:
         print("Enter y or n.")
 
 
-def prompt_train_config() -> tuple[TrainConfig, str | None, bool]:
+def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
     default_cfg = TrainConfig()
     print("\nSnake offline training setup")
     print("Press Enter to keep defaults.\n")
@@ -269,7 +315,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool]:
     first = input("Quick start: press Enter to configure, or type 'default' to run with all defaults: ").strip().lower()
     if first == "default":
         # Default quick-start prefers speed: no live plotting.
-        return default_cfg, None, False
+        return default_cfg, None, False, 25, True
 
     board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
@@ -286,6 +332,8 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool]:
     stall_penalty = _prompt_float("Stall penalty", default_cfg.stall_penalty, max_value=0.0)
     use_distance_shaping = _prompt_bool("Use distance-based reward shaping", default_cfg.distance_reward_shaping)
     show_plot = _prompt_bool("Show live matplotlib plot", False)
+    print_every = _prompt_int("Print stats every N episodes", 25, min_value=1)
+    show_final_trend_plot = _prompt_bool("Show end trend plot when live plot is off", True)
 
     load_raw = input("Model to load (.pt), blank for none: ").strip()
     cfg = TrainConfig(
@@ -306,7 +354,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool]:
         state_encoding=default_cfg.state_encoding,
     )
     load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
-    return cfg, load_path, show_plot
+    return cfg, load_path, show_plot, print_every, show_final_trend_plot
 
 
 def _prompt_save_after_training(agent: SnakeDQNAgent, cfg: TrainConfig) -> None:
@@ -332,7 +380,7 @@ def run_offline_training_cli() -> None:
     args = parse_args()
     interactive = args.interactive or len(sys.argv) == 1
     if interactive:
-        cfg, load_path, show_plot = prompt_train_config()
+        cfg, load_path, show_plot, print_every, show_final_trend_plot = prompt_train_config()
         save_path = None
     else:
         cfg = TrainConfig(
@@ -355,8 +403,17 @@ def run_offline_training_cli() -> None:
         load_path = args.load if args.load else None
         save_path = args.save if args.save else None
         show_plot = not args.no_plot
+        print_every = args.print_every
+        show_final_trend_plot = not args.no_final_trend_plot
 
-    agent, _, _ = train_offline(cfg, load_path=load_path, save_path=save_path, show_plot=show_plot)
+    agent, _, _ = train_offline(
+        cfg,
+        load_path=load_path,
+        save_path=save_path,
+        show_plot=show_plot,
+        print_every=print_every,
+        show_final_trend_plot=show_final_trend_plot,
+    )
 
     if interactive and not save_path:
         _prompt_save_after_training(agent, cfg)
