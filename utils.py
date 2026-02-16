@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import os
 import threading
 import time
@@ -25,7 +26,7 @@ MIN_HIDDEN_LAYERS = 1
 MAX_HIDDEN_LAYERS = 8
 MIN_NEURONS_PER_LAYER = 8
 MAX_NEURONS_PER_LAYER = 2048
-DEFAULT_HIDDEN_LAYERS = (256, 256)
+DEFAULT_HIDDEN_LAYERS = (128, 128, 64)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
@@ -99,25 +100,36 @@ class TrainConfig:
     episodes: int = 30000
     max_steps: int = 250
     gamma: float = 0.90
-    lr: float = 0.0003
+    lr: float = 0.001
     epsilon_start: float = 1.0
-    epsilon_min: float = 0.05
+    epsilon_min: float = 0.02
     epsilon_decay: float = 0.999
-    batch_size: int = 1000
+    batch_size: int = 64
     memory_size: int = 80_000
+    replay_warmup: int = 2000
     hidden_layers: tuple[int, ...] = DEFAULT_HIDDEN_LAYERS
-    target_update_every: int = 1000
+    target_update_every: int = 1
+    soft_tau: float = 0.005
+    n_step: int = 5
     step_delay: float = 0.0
-    distance_reward_shaping: bool = True
     state_encoding: str = STATE_ENCODING_INTEGER
     stall_limit_factor: int = 100
-    stall_penalty: float = -5.0
-    reward_step: float = -0.01
-    reward_apple: float = 10.0
-    penalty_death: float = -20.0
-    reward_win: float = 50.0
-    distance_reward_delta: float = 0.25
-    survival_reward_base: float = 1.0
+    lr_start: float = 1e-3
+    lr_end: float = 2e-4
+    gamma_start: float = 0.90
+    gamma_end: float = 0.99
+    epsilon_decay_rate: float = 5.0
+    batch_size_start: int = 64
+    batch_size_end: int = 128
+    food_reward_base: float = 1.0
+    food_reward_min: float = 0.3
+    survival_reward_start: float = 0.01
+    survival_reward_end: float = 0.10
+    death_reward: float = -1.0
+    terminal_bonus_alpha_start: float = 0.02
+    terminal_bonus_alpha_end: float = 0.10
+    terminal_bonus_power: float = 1.2
+    q_explosion_threshold: float = 100.0
 
     def __post_init__(self) -> None:
         self.hidden_layers = normalize_hidden_layers(self.hidden_layers)
@@ -125,20 +137,30 @@ class TrainConfig:
             self.state_encoding = STATE_ENCODING_INTEGER
         if self.state_encoding not in SUPPORTED_STATE_ENCODINGS:
             raise ValueError(f"Unsupported state encoding: {self.state_encoding}")
+        if self.episodes <= 0:
+            raise ValueError("episodes must be > 0.")
+        if self.max_steps <= 0:
+            raise ValueError("max_steps must be > 0.")
+        if self.memory_size <= 0:
+            raise ValueError("memory_size must be > 0.")
+        if self.replay_warmup < 0:
+            raise ValueError("replay_warmup must be >= 0.")
+        if self.n_step <= 0:
+            raise ValueError("n_step must be > 0.")
 
 
 @dataclass(frozen=True)
 class EpisodeDynamics:
+    progress: float
     gamma: float
     n_step: int
-    long_term_weight: float
-    distance_weight: float
-    survival_weight: float
     lr: float
     epsilon: float
-    target_update_mode: str  # hard | soft
-    target_update_every: int
-    target_soft_tau: float
+    batch_size: int
+    food_reward: float
+    survival_reward: float
+    death_reward: float
+    terminal_bonus_alpha: float
 
 
 class AgentLike(Protocol):
@@ -154,11 +176,12 @@ class AgentLike(Protocol):
         action: int,
         reward: float,
         next_state: np.ndarray,
+        next_direction: str,
         done: bool,
         discount: float,
     ) -> None: ...
 
-    def train_step(self) -> float | None: ...
+    def train_step(self) -> dict[str, float] | None: ...
     def apply_episode_dynamics(self, dynamics: EpisodeDynamics) -> None: ...
 
 
@@ -231,90 +254,39 @@ def nearest_apple_distance(game: SnakeGame) -> int:
     return abs(ax - hx) + abs(ay - hy)
 
 
-def _linear_interp(episode: int, start_ep: int, end_ep: int, start_value: float, end_value: float) -> float:
-    if episode <= start_ep:
-        return start_value
-    if episode >= end_ep:
-        return end_value
-    ratio = (episode - start_ep) / float(end_ep - start_ep)
-    return start_value + ratio * (end_value - start_value)
+def episode_progress(episode: int, total_episodes: int) -> float:
+    if total_episodes <= 0:
+        return 1.0
+    return max(0.0, min(1.0, episode / float(total_episodes)))
 
 
-def episode_dynamics(episode: int) -> EpisodeDynamics:
-    # Gamma: 0-500 => 0.90, 500-5000 => 0.97, 5000+ => 0.99
-    if episode <= 500:
-        gamma = 0.90
-    elif episode <= 5000:
-        gamma = _linear_interp(episode, 500, 5000, 0.90, 0.97)
-    else:
-        gamma = 0.99
+def episode_dynamics(episode: int, cfg: TrainConfig) -> EpisodeDynamics:
+    progress = episode_progress(episode, cfg.episodes)
 
-    # N-step schedule.
-    if episode < 2000:
-        n_step = 1
-    elif episode < 5000:
-        n_step = 3
-    else:
-        n_step = 5
+    # Smooth schedules only: no abrupt switches in gamma/lr/epsilon/weights.
+    gamma = cfg.gamma_start + (cfg.gamma_end - cfg.gamma_start) * progress
+    lr = cfg.lr_start * (1.0 - 0.8 * progress)
+    epsilon = max(cfg.epsilon_min, cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * progress))
+    batch_size = int(round(cfg.batch_size_start + (cfg.batch_size_end - cfg.batch_size_start) * progress))
+    batch_size = max(cfg.batch_size_start, min(cfg.batch_size_end, batch_size))
 
-    # Long-term target weighting.
-    if episode <= 500:
-        long_term_weight = 0.5
-    elif episode <= 3000:
-        long_term_weight = _linear_interp(episode, 500, 3000, 0.5, 1.0)
-    else:
-        long_term_weight = 1.2
-
-    # Reward shaping schedule.
-    if episode < 2000:
-        distance_weight = 0.2
-        survival_weight = 0.05
-    elif episode < 5000:
-        distance_weight = 0.1
-        survival_weight = 0.1
-    else:
-        distance_weight = 0.05
-        survival_weight = 0.2
-
-    # Learning-rate schedule.
-    if episode < 5000:
-        lr = 3e-4
-    elif episode < 10000:
-        lr = 1e-4
-    else:
-        lr = 5e-5
-
-    # Epsilon schedule with periodic exploration spikes.
-    if episode <= 2000:
-        epsilon = _linear_interp(episode, 1, 2000, 1.0, 0.3)
-    elif episode <= 10000:
-        epsilon = _linear_interp(episode, 2000, 10000, 0.3, 0.05)
-    else:
-        epsilon = 0.05
-    if episode > 0 and ((episode - 1) % 5000) < 200:
-        epsilon = max(epsilon, 0.2)
-
-    # Target net updates: hard first, then soft.
-    if episode < 3000:
-        target_update_mode = "hard"
-        target_update_every = 1000
-        target_soft_tau = 0.0
-    else:
-        target_update_mode = "soft"
-        target_update_every = 1000
-        target_soft_tau = 0.005
+    food_reward = max(cfg.food_reward_min, cfg.food_reward_base * (1.0 - 0.7 * progress))
+    survival_reward = cfg.survival_reward_start + (cfg.survival_reward_end - cfg.survival_reward_start) * progress
+    terminal_bonus_alpha = cfg.terminal_bonus_alpha_start + (
+        cfg.terminal_bonus_alpha_end - cfg.terminal_bonus_alpha_start
+    ) * progress
 
     return EpisodeDynamics(
+        progress=progress,
         gamma=gamma,
-        n_step=n_step,
-        long_term_weight=long_term_weight,
-        distance_weight=distance_weight,
-        survival_weight=survival_weight,
+        n_step=cfg.n_step,
         lr=lr,
         epsilon=epsilon,
-        target_update_mode=target_update_mode,
-        target_update_every=target_update_every,
-        target_soft_tau=target_soft_tau,
+        batch_size=batch_size,
+        food_reward=food_reward,
+        survival_reward=survival_reward,
+        death_reward=cfg.death_reward,
+        terminal_bonus_alpha=terminal_bonus_alpha,
     )
 
 
@@ -423,7 +395,7 @@ def run_episode(
     render_step: Callable[[SnakeGame, int, int, float], None] | None = None,
     stop_flag: threading.Event | None = None,
     game: SnakeGame | None = None,
-) -> tuple[int, float, int]:
+) -> tuple[int, float, int, dict[str, float]]:
     """Run one episode and optionally train the agent online from each transition."""
     if game is None:
         game = make_game(cfg)
@@ -432,17 +404,22 @@ def run_episode(
     else:
         game.reset()
 
-    dynamics = episode_dynamics(episode_index)
+    dynamics = episode_dynamics(episode_index, cfg)
     if train:
         agent.apply_episode_dynamics(dynamics)
 
     total_reward = 0.0
     steps_taken = 0
     board_capacity = cfg.board_size * cfg.board_size
-    use_distance_shaping = cfg.distance_reward_shaping
     state = encode_state(game, cfg)
     stagnation_steps = 0
-    n_step_buffer: list[tuple[np.ndarray, int, float, np.ndarray, bool]] = []
+    n_step_buffer: list[tuple[np.ndarray, int, float, np.ndarray, str, bool]] = []
+
+    food_reward_total = 0.0
+    survival_reward_total = 0.0
+    death_reward_total = 0.0
+    terminal_bonus_total = 0.0
+    train_metrics: list[dict[str, float]] = []
 
     def flush_one_transition() -> None:
         if not n_step_buffer:
@@ -451,15 +428,16 @@ def run_episode(
         reward_sum = 0.0
         for idx in range(horizon):
             reward_sum += (dynamics.gamma**idx) * n_step_buffer[idx][2]
-            if n_step_buffer[idx][4]:
+            if n_step_buffer[idx][5]:
                 horizon = idx + 1
                 break
 
         first_state, first_action = n_step_buffer[0][0], n_step_buffer[0][1]
         next_state = n_step_buffer[horizon - 1][3]
-        done = n_step_buffer[horizon - 1][4]
+        next_direction = n_step_buffer[horizon - 1][4]
+        done = n_step_buffer[horizon - 1][5]
         discount = dynamics.gamma**horizon
-        agent.remember(first_state, first_action, reward_sum, next_state, done, discount)
+        agent.remember(first_state, first_action, reward_sum, next_state, next_direction, done, discount)
         n_step_buffer.pop(0)
 
     for step in range(cfg.max_steps):
@@ -475,9 +453,8 @@ def run_episode(
             action = ACTIONS[action_idx]
 
         old_length = len(game.snake)
-        old_distance = nearest_apple_distance(game) if use_distance_shaping else 0
 
-        game.queue_direction(action)
+        game.queue_direction(action) # type: ignore
         alive = game.move()
 
         new_length = len(game.snake)
@@ -487,37 +464,41 @@ def run_episode(
         else:
             stagnation_steps += 1
         stalled = stagnation_steps > cfg.stall_limit_factor * max(1, len(game.snake))
-
-        reward = cfg.reward_step
-        if not alive:
-            reward = cfg.penalty_death
-        elif won:
-            reward = cfg.reward_win
-        elif stalled:
-            reward = cfg.stall_penalty
-        elif new_length > old_length:
-            reward = cfg.reward_apple
-        elif use_distance_shaping:
-            new_distance = nearest_apple_distance(game)
-            if new_distance < old_distance:
-                reward += cfg.distance_reward_delta * dynamics.distance_weight
-            elif new_distance > old_distance:
-                reward -= cfg.distance_reward_delta * dynamics.distance_weight
-
-        if alive and not won and not stalled:
-            reward += cfg.survival_reward_base * dynamics.survival_weight
-
         done = (not alive) or won or stalled
         next_state = encode_state(game, cfg)
+        next_direction = game.direction
+
+        # Dense rewards transition smoothly over training progress:
+        # early learning favors food discovery, late learning favors survival.
+        food_reward = dynamics.food_reward if new_length > old_length else 0.0
+        survival_reward = dynamics.survival_reward if alive else 0.0
+        death_reward = dynamics.death_reward if (not alive or stalled) else 0.0
+        immediate_reward = food_reward + survival_reward + death_reward
+        # Clip immediate reward for TD stability; terminal score bonus stays separate from this clip.
+        clipped_immediate_reward = float(np.clip(immediate_reward, -1.0, 1.0))
+
+        terminal_bonus = 0.0
+        if done:
+            # Terminal performance bonus scales superlinearly with apples eaten.
+            final_score = float(game.score)
+            terminal_bonus = dynamics.terminal_bonus_alpha * (max(0.0, final_score) ** cfg.terminal_bonus_power)
+        reward = clipped_immediate_reward + terminal_bonus
+
+        food_reward_total += food_reward
+        survival_reward_total += survival_reward
+        death_reward_total += death_reward
+        terminal_bonus_total += terminal_bonus
 
         if train:
-            n_step_buffer.append((state, action_idx, reward, next_state, done))
+            n_step_buffer.append((state, action_idx, reward, next_state, next_direction, done))
             if len(n_step_buffer) >= dynamics.n_step:
                 flush_one_transition()
             if done:
                 while n_step_buffer:
                     flush_one_transition()
-            agent.train_step()
+            metrics = agent.train_step()
+            if metrics is not None:
+                train_metrics.append(metrics)
 
         total_reward += reward
 
@@ -532,4 +513,33 @@ def run_episode(
         if done:
             break
 
-    return len(game.snake), total_reward, steps_taken
+    if train:
+        while n_step_buffer:
+            flush_one_transition()
+        metrics = agent.train_step()
+        if metrics is not None:
+            train_metrics.append(metrics)
+
+    step_norm = float(max(1, steps_taken))
+    mean_q = float(np.mean([m["mean_q"] for m in train_metrics])) if train_metrics else 0.0
+    td_error_mean = float(np.mean([m["td_error_mean"] for m in train_metrics])) if train_metrics else 0.0
+    max_abs_q = float(np.max([m["max_abs_q"] for m in train_metrics])) if train_metrics else 0.0
+    loss_mean = float(np.mean([m["loss"] for m in train_metrics])) if train_metrics else 0.0
+
+    episode_stats = {
+        "progress": dynamics.progress,
+        "gamma": dynamics.gamma,
+        "lr": dynamics.lr,
+        "epsilon": dynamics.epsilon,
+        "batch_size": float(dynamics.batch_size),
+        "episode_length": float(steps_taken),
+        "avg_food_reward": food_reward_total / step_norm,
+        "avg_survival_reward": survival_reward_total / step_norm,
+        "avg_death_reward": death_reward_total / step_norm,
+        "terminal_bonus": terminal_bonus_total,
+        "mean_q": mean_q,
+        "td_error_mean": td_error_mean,
+        "max_abs_q": max_abs_q,
+        "loss": loss_mean,
+    }
+    return len(game.snake), total_reward, steps_taken, episode_stats

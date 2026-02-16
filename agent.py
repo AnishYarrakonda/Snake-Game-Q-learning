@@ -42,10 +42,19 @@ class MLPQNetwork(nn.Module):
     def __init__(self, input_size: int, hidden_layers: tuple[int, ...], output_size: int = 4) -> None:
         super().__init__()
         layers: list[nn.Module] = []
+        if not hidden_layers:
+            raise ValueError("hidden_layers cannot be empty.")
+
         in_features = input_size
-        for width in hidden_layers:
+        first_width = hidden_layers[0]
+        layers.append(nn.Linear(in_features, first_width))
+        layers.append(nn.LayerNorm(first_width))
+        layers.append(nn.ReLU())
+        in_features = first_width
+
+        for width in hidden_layers[1:]:
             layers.append(nn.Linear(in_features, width))
-            layers.append(nn.SiLU())
+            layers.append(nn.ReLU())
             in_features = width
         layers.append(nn.Linear(in_features, output_size))
         self.net = nn.Sequential(*layers)
@@ -76,15 +85,14 @@ class SnakeDQNAgent:
         self.target_net.eval()
 
         self.optimizer = torch.optim.AdamW(self.policy_net.parameters(), lr=cfg.lr, weight_decay=1e-5)
-        self.memory: deque[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = deque(maxlen=cfg.memory_size)
+        self.memory: deque[tuple[np.ndarray, int, float, np.ndarray, str, bool, float]] = deque(maxlen=cfg.memory_size)
 
         self.epsilon = cfg.epsilon_start
         self.learn_steps = 0
         self.gamma = cfg.gamma
-        self.long_term_weight = 1.0
-        self.target_update_mode = "hard"
-        self.target_update_every = cfg.target_update_every
-        self.target_soft_tau = 0.0
+        self.batch_size_current = cfg.batch_size
+        self.replay_warmup = cfg.replay_warmup
+        self.soft_tau = cfg.soft_tau
 
     def valid_action_indices(self, current_direction: str) -> list[int]:
         return VALID_ACTIONS_BY_DIRECTION[current_direction]
@@ -111,28 +119,26 @@ class SnakeDQNAgent:
         action: int,
         reward: float,
         next_state: np.ndarray,
+        next_direction: str,
         done: bool,
         discount: float,
     ) -> None:
-        self.memory.append((state, action, reward, next_state, done, discount))
+        self.memory.append((state, action, reward, next_state, next_direction, done, discount))
 
     def apply_episode_dynamics(self, dynamics: EpisodeDynamics) -> None:
         self.gamma = dynamics.gamma
-        self.long_term_weight = dynamics.long_term_weight
         self.epsilon = dynamics.epsilon
-        self.target_update_mode = dynamics.target_update_mode
-        self.target_update_every = dynamics.target_update_every
-        self.target_soft_tau = dynamics.target_soft_tau
+        self.batch_size_current = max(1, int(dynamics.batch_size))
         for group in self.optimizer.param_groups:
             group["lr"] = dynamics.lr
 
-    def train_step(self) -> float | None:
-        if not self.memory:
+    def train_step(self) -> dict[str, float] | None:
+        if len(self.memory) < self.replay_warmup:
             return None
 
-        sample_size = min(len(self.memory), self.cfg.batch_size)
+        sample_size = min(len(self.memory), self.batch_size_current)
         batch = random.sample(self.memory, sample_size)
-        states, actions, rewards, next_states, dones, discounts = zip(*batch)
+        states, actions, rewards, next_states, next_directions, dones, discounts = zip(*batch)
 
         states_t = torch.from_numpy(np.stack(states).astype(np.float32, copy=False)).to(self.device)
         actions_t = torch.from_numpy(np.fromiter(actions, dtype=np.int64, count=sample_size)).to(self.device)
@@ -144,27 +150,40 @@ class SnakeDQNAgent:
         current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            # Double DQN: select with policy net, evaluate with target net.
-            next_actions = self.policy_net(next_states_t).argmax(dim=1, keepdim=True)
+            # Double DQN with invalid-action masking on action selection.
+            next_policy_q = self.policy_net(next_states_t)
+            masked_next_policy_q = torch.full_like(next_policy_q, -1e9)
+            for idx, direction in enumerate(next_directions):
+                valid_indices = VALID_ACTIONS_BY_DIRECTION[direction]
+                masked_next_policy_q[idx, valid_indices] = next_policy_q[idx, valid_indices]
+            next_actions = masked_next_policy_q.argmax(dim=1, keepdim=True)
             next_q = self.target_net(next_states_t).gather(1, next_actions).squeeze(1)
 
-        target_q = rewards_t + self.long_term_weight * discounts_t * next_q * (1.0 - dones_t)
+        target_q = rewards_t + discounts_t * next_q * (1.0 - dones_t)
+        td_error = target_q - current_q
 
         loss = F.smooth_l1_loss(current_q, target_q)
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
+        nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
         self.optimizer.step()
 
-        self.learn_steps += 1
-        if self.target_update_mode == "soft":
-            tau = self.target_soft_tau
-            for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
-                target_param.data.mul_(1.0 - tau).add_(policy_param.data, alpha=tau)
-        elif self.learn_steps % self.target_update_every == 0:
-            self.target_net.load_state_dict(self.policy_net.state_dict())
+        # Continuous soft target update each optimization step.
+        for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
+            target_param.data.mul_(1.0 - self.soft_tau).add_(policy_param.data, alpha=self.soft_tau)
 
-        return float(loss.item())
+        self.learn_steps += 1
+        with torch.no_grad():
+            mean_q = float(current_q.mean().item())
+            td_error_mean = float(td_error.abs().mean().item())
+            max_abs_q = float(current_q.abs().max().item())
+
+        return {
+            "loss": float(loss.item()),
+            "mean_q": mean_q,
+            "td_error_mean": td_error_mean,
+            "max_abs_q": max_abs_q,
+        }
 
     def decay_epsilon(self) -> None:
         self.epsilon = max(self.cfg.epsilon_min, self.epsilon * self.cfg.epsilon_decay)

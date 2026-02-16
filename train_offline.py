@@ -109,6 +109,16 @@ def train_offline(
     recent_10: deque[float] = deque(maxlen=10)
     log_chunk_size = max(1, int(print_every))
     recent_chunk: deque[float] = deque(maxlen=log_chunk_size)
+    recent_steps: deque[float] = deque(maxlen=log_chunk_size)
+    recent_q_mean: deque[float] = deque(maxlen=log_chunk_size)
+    recent_td_error: deque[float] = deque(maxlen=log_chunk_size)
+    recent_food_r: deque[float] = deque(maxlen=log_chunk_size)
+    recent_survival_r: deque[float] = deque(maxlen=log_chunk_size)
+    recent_terminal_bonus: deque[float] = deque(maxlen=log_chunk_size)
+    recent_loss: deque[float] = deque(maxlen=log_chunk_size)
+    recent_total_reward: deque[float] = deque(maxlen=log_chunk_size)
+    recent_q_explodes: deque[int] = deque(maxlen=log_chunk_size)
+    rolling_scores_500: deque[float] = deque(maxlen=500)
     chunk_episode_ends: list[int] = []
     chunk_avg_scores: list[float] = []
     chunk_median_scores: list[float] = []
@@ -121,7 +131,11 @@ def train_offline(
         f"{'Avg':^10}"
         f"{'Median':^10}"
         f"{'Max':^10}"
+        f"{'Max500':^10}"
+        f"{'AvgStep':^10}"
         f"{'Epsilon':^12}"
+        f"{'MeanQ':^10}"
+        f"{'TDerr':^10}"
     )
     print(header)
     print("-" * len(header))
@@ -137,7 +151,7 @@ def train_offline(
         if stop_flag and stop_flag.is_set():
             break
 
-        score, _, _ = run_episode(
+        score, total_reward, steps_taken, episode_stats = run_episode(
             agent,
             cfg,
             episode_index=episode,
@@ -146,8 +160,18 @@ def train_offline(
             game=episode_game,
         )
         scores.append(float(score))
+        rolling_scores_500.append(float(score))
         recent_10.append(float(score))
         recent_chunk.append(float(score))
+        recent_steps.append(float(steps_taken))
+        recent_q_mean.append(float(episode_stats["mean_q"]))
+        recent_td_error.append(float(episode_stats["td_error_mean"]))
+        recent_food_r.append(float(episode_stats["avg_food_reward"]))
+        recent_survival_r.append(float(episode_stats["avg_survival_reward"]))
+        recent_terminal_bonus.append(float(episode_stats["terminal_bonus"]))
+        recent_loss.append(float(episode_stats["loss"]))
+        recent_total_reward.append(float(total_reward))
+        recent_q_explodes.append(int(abs(float(episode_stats["max_abs_q"])) > cfg.q_explosion_threshold))
         avg10 = float(np.mean(recent_10))
         avg10_scores.append(avg10)
 
@@ -164,6 +188,16 @@ def train_offline(
             avg_chunk = float(np.mean(recent_chunk))
             median_chunk = float(np.median(recent_chunk))
             max_chunk = float(np.max(recent_chunk))
+            max_rolling_500 = float(np.max(rolling_scores_500)) if rolling_scores_500 else 0.0
+            avg_steps = float(np.mean(recent_steps)) if recent_steps else 0.0
+            avg_q = float(np.mean(recent_q_mean)) if recent_q_mean else 0.0
+            avg_td = float(np.mean(recent_td_error)) if recent_td_error else 0.0
+            avg_food = float(np.mean(recent_food_r)) if recent_food_r else 0.0
+            avg_survival = float(np.mean(recent_survival_r)) if recent_survival_r else 0.0
+            avg_bonus = float(np.mean(recent_terminal_bonus)) if recent_terminal_bonus else 0.0
+            avg_loss = float(np.mean(recent_loss)) if recent_loss else 0.0
+            avg_reward = float(np.mean(recent_total_reward)) if recent_total_reward else 0.0
+            chunk_q_explodes = int(np.sum(recent_q_explodes)) if recent_q_explodes else 0
             chunk_episode_ends.append(episode)
             chunk_avg_scores.append(avg_chunk)
             chunk_median_scores.append(median_chunk)
@@ -175,9 +209,26 @@ def train_offline(
                 f"{avg_chunk:^10.2f}"
                 f"{median_chunk:^10.2f}"
                 f"{max_chunk:^10.0f}"
+                f"{max_rolling_500:^10.0f}"
+                f"{avg_steps:^10.1f}"
                 f"{agent.epsilon:^12.4f}"
+                f"{avg_q:^10.2f}"
+                f"{avg_td:^10.3f}"
             )
             print(row)
+            print(
+                f"{'':18}"
+                f"{'FoodR':>8}:{avg_food:<8.3f}"
+                f"{'SurvR':>8}:{avg_survival:<8.3f}"
+                f"{'TBonus':>8}:{avg_bonus:<8.3f}"
+                f"{'Loss':>8}:{avg_loss:<8.4f}"
+                f"{'Reward':>8}:{avg_reward:<8.3f}"
+            )
+            if chunk_q_explodes > 0:
+                print(
+                    f"Warning: detected {chunk_q_explodes} episodes with |Q| > {cfg.q_explosion_threshold:.1f} "
+                    f"in this chunk."
+                )
             print()
 
     if save_path:

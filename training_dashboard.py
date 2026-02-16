@@ -577,7 +577,7 @@ class TrainingDashboard:
                         break
                     current_cfg = self._get_runtime_cfg()
 
-                    score, _, _ = run_episode(
+                    score, _, _, _ = run_episode(
                         self.agent,
                         current_cfg,
                         episode_index=episode,
@@ -649,7 +649,7 @@ class TrainingDashboard:
                     current_cfg = self._get_runtime_cfg()
                     watch_cfg = replace(current_cfg, step_delay=current_cfg.step_delay)
 
-                    score, _, _ = run_episode(
+                    score, _, _, _ = run_episode(
                         self.agent,
                         watch_cfg,
                         episode_index=episode,
