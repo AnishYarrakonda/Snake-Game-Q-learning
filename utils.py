@@ -19,13 +19,77 @@ BOARD_SIZES = (10, 20, 30, 40)
 APPLE_CHOICES = (1, 3, 5, 10)
 ACTIONS = ("up", "down", "left", "right")
 REVERSE_DIRECTION = {"up": "down", "down": "up", "left": "right", "right": "left"}
-RELATIVE_ACTIONS = ("straight", "right", "left")
-TURN_RIGHT = {"up": "right", "right": "down", "down": "left", "left": "up"}
-TURN_LEFT = {"up": "left", "left": "down", "down": "right", "right": "up"}
+STATE_ENCODING_INTEGER = "integer12"
+SUPPORTED_STATE_ENCODINGS = (STATE_ENCODING_INTEGER, "compact11")
+MIN_HIDDEN_LAYERS = 1
+MAX_HIDDEN_LAYERS = 8
+MIN_NEURONS_PER_LAYER = 8
+MAX_NEURONS_PER_LAYER = 2048
+DEFAULT_HIDDEN_LAYERS = (256, 256)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
+
+
+def _parse_positive_int(raw: str, label: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{label} must be an integer.")
+    if value <= 0:
+        raise ValueError(f"{label} must be > 0.")
+    return value
+
+
+def normalize_hidden_layers(raw_layers: object) -> tuple[int, ...]:
+    if isinstance(raw_layers, int):
+        layers = (raw_layers,)
+    elif isinstance(raw_layers, tuple):
+        layers = raw_layers
+    elif isinstance(raw_layers, list):
+        layers = tuple(raw_layers)
+    else:
+        raise ValueError("Hidden layers must be an int, list[int], or tuple[int, ...].")
+
+    if not (MIN_HIDDEN_LAYERS <= len(layers) <= MAX_HIDDEN_LAYERS):
+        raise ValueError(f"Hidden layer count must be between {MIN_HIDDEN_LAYERS} and {MAX_HIDDEN_LAYERS}.")
+
+    validated: list[int] = []
+    for idx, width in enumerate(layers, start=1):
+        if not isinstance(width, int):
+            raise ValueError(f"Hidden layer {idx} width must be an integer.")
+        if not (MIN_NEURONS_PER_LAYER <= width <= MAX_NEURONS_PER_LAYER):
+            raise ValueError(
+                f"Hidden layer {idx} width must be between {MIN_NEURONS_PER_LAYER} and {MAX_NEURONS_PER_LAYER}."
+            )
+        validated.append(width)
+    return tuple(validated)
+
+
+def parse_hidden_layer_widths(layer_count: int, neurons_raw: str) -> tuple[int, ...]:
+    if not (MIN_HIDDEN_LAYERS <= layer_count <= MAX_HIDDEN_LAYERS):
+        raise ValueError(f"Hidden layers must be between {MIN_HIDDEN_LAYERS} and {MAX_HIDDEN_LAYERS}.")
+
+    raw = neurons_raw.strip()
+    if not raw:
+        raise ValueError("Neurons per layer is required.")
+
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("Neurons per layer is required.")
+
+    if len(parts) == 1:
+        width = _parse_positive_int(parts[0], "Neurons per layer")
+        return normalize_hidden_layers(tuple(width for _ in range(layer_count)))
+
+    if len(parts) != layer_count:
+        raise ValueError(
+            f"Neurons per layer must be a single integer or exactly {layer_count} comma-separated integers."
+        )
+
+    widths = tuple(_parse_positive_int(part, f"Neurons for hidden layer {idx + 1}") for idx, part in enumerate(parts))
+    return normalize_hidden_layers(widths)
 
 
 @dataclass
@@ -41,11 +105,11 @@ class TrainConfig:
     epsilon_decay: float = 0.999
     batch_size: int = 1000
     memory_size: int = 80_000
-    hidden_dim: int = 256
+    hidden_layers: tuple[int, ...] = DEFAULT_HIDDEN_LAYERS
     target_update_every: int = 1000
     step_delay: float = 0.0
     distance_reward_shaping: bool = True
-    state_encoding: str = "board"  # compact11 | board
+    state_encoding: str = STATE_ENCODING_INTEGER
     stall_limit_factor: int = 100
     stall_penalty: float = -5.0
     reward_step: float = -0.01
@@ -54,6 +118,13 @@ class TrainConfig:
     reward_win: float = 50.0
     distance_reward_delta: float = 0.25
     survival_reward_base: float = 1.0
+
+    def __post_init__(self) -> None:
+        self.hidden_layers = normalize_hidden_layers(self.hidden_layers)
+        if self.state_encoding == "compact11":
+            self.state_encoding = STATE_ENCODING_INTEGER
+        if self.state_encoding not in SUPPORTED_STATE_ENCODINGS:
+            raise ValueError(f"Unsupported state encoding: {self.state_encoding}")
 
 
 @dataclass(frozen=True)
@@ -91,20 +162,9 @@ class AgentLike(Protocol):
     def apply_episode_dynamics(self, dynamics: EpisodeDynamics) -> None: ...
 
 
-def default_model_path(board_size: int, state_encoding: str = "compact11") -> str:
-    mode = "compact11" if state_encoding == "compact11" else "board"
+def default_model_path(board_size: int, state_encoding: str = STATE_ENCODING_INTEGER) -> str:
+    mode = "integer12" if state_encoding in SUPPORTED_STATE_ENCODINGS else state_encoding
     return os.path.join(MODELS_DIR, f"snake_dqn_{mode}_{board_size}x{board_size}.pt")
-
-
-def encode_board_state(game: SnakeGame, board_size: int) -> np.ndarray:
-    """3-channel board tensor: head, body, apples."""
-    board = np.zeros((3, board_size, board_size), dtype=np.float32)
-    for x, y in game.apples:
-        board[2, y, x] = 1.0
-    for idx, (x, y) in enumerate(game.snake):
-        channel = 0 if idx == 0 else 1
-        board[channel, y, x] = 1.0
-    return board
 
 
 def _is_collision(game: SnakeGame, x: int, y: int) -> bool:
@@ -112,16 +172,6 @@ def _is_collision(game: SnakeGame, x: int, y: int) -> bool:
     if x < 0 or x >= size or y < 0 or y >= size:
         return True
     return (x, y) in game.snake_set
-
-
-def _next_xy(x: int, y: int, direction: str) -> tuple[int, int]:
-    if direction == "up":
-        return x, y - 1
-    if direction == "down":
-        return x, y + 1
-    if direction == "left":
-        return x - 1, y
-    return x + 1, y
 
 
 def nearest_apple_position(game: SnakeGame) -> tuple[int, int]:
@@ -138,37 +188,31 @@ def nearest_apple_position(game: SnakeGame) -> tuple[int, int]:
     return best if best is not None else (hx, hy)
 
 
-def encode_compact_state(game: SnakeGame) -> np.ndarray:
+def encode_integer_state(game: SnakeGame) -> np.ndarray:
     """
-    Patrick Loeber style compact state:
-    [danger_straight, danger_right, danger_left,
-     dir_left, dir_right, dir_up, dir_down,
-     food_left, food_right, food_up, food_down]
+    Integer feature state:
+    [danger_up, danger_down, danger_left, danger_right,
+     dir_up, dir_down, dir_left, dir_right,
+     food_up, food_down, food_left, food_right]
     """
     hx, hy = game.snake[0]
     direction = game.direction
-    right_dir = TURN_RIGHT[direction]
-    left_dir = TURN_LEFT[direction]
-
-    sx, sy = _next_xy(hx, hy, direction)
-    rx, ry = _next_xy(hx, hy, right_dir)
-    lx, ly = _next_xy(hx, hy, left_dir)
-
     ax, ay = nearest_apple_position(game)
 
     state = np.array(
         [
-            int(_is_collision(game, sx, sy)),
-            int(_is_collision(game, rx, ry)),
-            int(_is_collision(game, lx, ly)),
-            int(direction == "left"),
-            int(direction == "right"),
+            int(_is_collision(game, hx, hy - 1)),
+            int(_is_collision(game, hx, hy + 1)),
+            int(_is_collision(game, hx - 1, hy)),
+            int(_is_collision(game, hx + 1, hy)),
             int(direction == "up"),
             int(direction == "down"),
-            int(ax < hx),
-            int(ax > hx),
+            int(direction == "left"),
+            int(direction == "right"),
             int(ay < hy),
             int(ay > hy),
+            int(ax < hx),
+            int(ax > hx),
         ],
         dtype=np.float32,
     )
@@ -176,9 +220,9 @@ def encode_compact_state(game: SnakeGame) -> np.ndarray:
 
 
 def encode_state(game: SnakeGame, cfg: TrainConfig) -> np.ndarray:
-    if cfg.state_encoding == "compact11":
-        return encode_compact_state(game)
-    return encode_board_state(game, cfg.board_size)
+    if cfg.state_encoding not in SUPPORTED_STATE_ENCODINGS:
+        raise ValueError(f"Unsupported state encoding: {cfg.state_encoding}")
+    return encode_integer_state(game)
 
 
 def nearest_apple_distance(game: SnakeGame) -> int:

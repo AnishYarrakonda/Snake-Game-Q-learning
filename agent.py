@@ -10,9 +10,25 @@ from torch import nn
 import torch.nn.functional as F
 
 try:
-    from .utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, EpisodeDynamics, TrainConfig
+    from .utils import (
+        ACTIONS,
+        REVERSE_DIRECTION,
+        EpisodeDynamics,
+        STATE_ENCODING_INTEGER,
+        SUPPORTED_STATE_ENCODINGS,
+        TrainConfig,
+        normalize_hidden_layers,
+    )
 except ImportError:
-    from utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, EpisodeDynamics, TrainConfig
+    from utils import (
+        ACTIONS,
+        REVERSE_DIRECTION,
+        EpisodeDynamics,
+        STATE_ENCODING_INTEGER,
+        SUPPORTED_STATE_ENCODINGS,
+        TrainConfig,
+        normalize_hidden_layers,
+    )
 
 VALID_ACTIONS_BY_DIRECTION = {
     direction: [idx for idx, action in enumerate(ACTIONS) if action != REVERSE_DIRECTION[direction]]
@@ -21,46 +37,21 @@ VALID_ACTIONS_BY_DIRECTION = {
 
 
 class MLPQNetwork(nn.Module):
-    """Feed-forward network used for compact vector state."""
+    """Feed-forward network for compact integer vector state."""
 
-    def __init__(self, input_size: int, hidden_dim: int = 256, output_size: int = 3) -> None:
+    def __init__(self, input_size: int, hidden_layers: tuple[int, ...], output_size: int = 4) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_size, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, output_size),
-        )
+        layers: list[nn.Module] = []
+        in_features = input_size
+        for width in hidden_layers:
+            layers.append(nn.Linear(in_features, width))
+            layers.append(nn.SiLU())
+            in_features = width
+        layers.append(nn.Linear(in_features, output_size))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
-
-
-class ConvQNetwork(nn.Module):
-    """Convolutional network for board tensor state."""
-
-    def __init__(self, board_size: int, output_size: int = 3) -> None:
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
-            nn.SiLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.SiLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.SiLU(),
-        )
-        flattened = 64 * board_size * board_size
-        self.head = nn.Sequential(
-            nn.Linear(flattened, 256),
-            nn.SiLU(),
-            nn.Linear(256, output_size),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        x = x.flatten(start_dim=1)
-        return self.head(x)
 
 
 class SnakeDQNAgent:
@@ -68,8 +59,9 @@ class SnakeDQNAgent:
 
     def __init__(self, cfg: TrainConfig, device: torch.device | None = None) -> None:
         self.cfg = cfg
-        self.uses_relative_actions = cfg.state_encoding == "compact11"
-        self.action_space = RELATIVE_ACTIONS if self.uses_relative_actions else ACTIONS
+        if cfg.state_encoding not in SUPPORTED_STATE_ENCODINGS:
+            raise ValueError(f"Unsupported state encoding: {cfg.state_encoding}")
+        self.action_space = ACTIONS
         if device is not None:
             self.device = device
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -77,12 +69,9 @@ class SnakeDQNAgent:
         else:
             self.device = torch.device("cpu")
 
-        if self.uses_relative_actions:
-            self.policy_net = MLPQNetwork(11, hidden_dim=cfg.hidden_dim, output_size=len(self.action_space)).to(self.device)
-            self.target_net = MLPQNetwork(11, hidden_dim=cfg.hidden_dim, output_size=len(self.action_space)).to(self.device)
-        else:
-            self.policy_net = ConvQNetwork(cfg.board_size, output_size=len(self.action_space)).to(self.device)
-            self.target_net = ConvQNetwork(cfg.board_size, output_size=len(self.action_space)).to(self.device)
+        hidden_layers = normalize_hidden_layers(cfg.hidden_layers)
+        self.policy_net = MLPQNetwork(12, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
+        self.target_net = MLPQNetwork(12, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -98,18 +87,10 @@ class SnakeDQNAgent:
         self.target_soft_tau = 0.0
 
     def valid_action_indices(self, current_direction: str) -> list[int]:
-        if self.uses_relative_actions:
-            return [0, 1, 2]
         return VALID_ACTIONS_BY_DIRECTION[current_direction]
 
     def action_to_direction(self, current_direction: str, action_idx: int) -> str:
-        if not self.uses_relative_actions:
-            return ACTIONS[action_idx]
-        if action_idx == 0:
-            return current_direction
-        if action_idx == 1:
-            return TURN_RIGHT[current_direction]
-        return TURN_LEFT[current_direction]
+        return ACTIONS[action_idx]
 
     def select_action(self, state: np.ndarray, valid_indices: list[int], explore: bool = True) -> int:
         if explore and random.random() < self.epsilon:
@@ -193,13 +174,30 @@ class SnakeDQNAgent:
             "board_size": self.cfg.board_size,
             "state_encoding": self.cfg.state_encoding,
             "action_space_size": len(self.action_space),
-            "hidden_dim": self.cfg.hidden_dim,
+            "hidden_layers": list(self.cfg.hidden_layers),
             "state_dict": self.policy_net.state_dict(),
             "epsilon": self.epsilon,
             "learn_steps": self.learn_steps,
             "cfg": vars(self.cfg),
         }
         torch.save(payload, path)
+
+    @staticmethod
+    def _hidden_layers_from_payload(payload: dict, fallback: tuple[int, ...]) -> tuple[int, ...]:
+        cfg_data = payload.get("cfg", {})
+        if "hidden_layers" in payload:
+            raw_layers = payload["hidden_layers"]
+        elif "hidden_layers" in cfg_data:
+            raw_layers = cfg_data["hidden_layers"]
+        elif "hidden_dim" in payload:
+            width = int(payload["hidden_dim"])
+            raw_layers = [width, width]
+        elif "hidden_dim" in cfg_data:
+            width = int(cfg_data["hidden_dim"])
+            raw_layers = [width, width]
+        else:
+            raw_layers = fallback
+        return normalize_hidden_layers(raw_layers)
 
     def load(self, path: str) -> None:
         payload = torch.load(path, map_location=self.device)
@@ -208,7 +206,11 @@ class SnakeDQNAgent:
             raise ValueError(
                 f"Model board size ({board_size}) does not match current board size ({self.cfg.board_size})."
             )
-        payload_state_encoding = str(payload.get("state_encoding", payload.get("cfg", {}).get("state_encoding", "board")))
+        payload_state_encoding = str(
+            payload.get("state_encoding", payload.get("cfg", {}).get("state_encoding", STATE_ENCODING_INTEGER))
+        )
+        if payload_state_encoding == "compact11":
+            payload_state_encoding = STATE_ENCODING_INTEGER
         if payload_state_encoding != self.cfg.state_encoding:
             raise ValueError(
                 f"Model state encoding ({payload_state_encoding}) does not match current state encoding "
@@ -220,6 +222,11 @@ class SnakeDQNAgent:
                 f"Model action space ({payload_action_space_size}) does not match current action space "
                 f"({len(self.action_space)})."
             )
+        payload_hidden_layers = self._hidden_layers_from_payload(payload, self.cfg.hidden_layers)
+        if payload_hidden_layers != self.cfg.hidden_layers:
+            raise ValueError(
+                f"Model hidden layers {payload_hidden_layers} do not match current hidden layers {self.cfg.hidden_layers}."
+            )
 
         self.policy_net.load_state_dict(payload["state_dict"])
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -230,9 +237,15 @@ class SnakeDQNAgent:
     def load_metadata(path: str) -> dict:
         """Read model metadata without constructing networks first."""
         payload = torch.load(path, map_location="cpu")
+        cfg_data = payload.get("cfg", {})
+        payload_state_encoding = str(payload.get("state_encoding", cfg_data.get("state_encoding", STATE_ENCODING_INTEGER)))
+        if payload_state_encoding == "compact11":
+            payload_state_encoding = STATE_ENCODING_INTEGER
+        hidden_layers = SnakeDQNAgent._hidden_layers_from_payload(payload, TrainConfig().hidden_layers)
         return {
             "board_size": int(payload.get("board_size", 20)),
-            "state_encoding": payload.get("state_encoding", payload.get("cfg", {}).get("state_encoding", "board")),
+            "state_encoding": payload_state_encoding,
             "action_space_size": int(payload.get("action_space_size", len(ACTIONS))),
-            "cfg": payload.get("cfg", {}),
+            "hidden_layers": hidden_layers,
+            "cfg": cfg_data,
         }

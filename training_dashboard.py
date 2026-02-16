@@ -25,11 +25,15 @@ try:
     from .utils import (
         APPLE_CHOICES,
         BOARD_SIZES,
+        MAX_HIDDEN_LAYERS,
+        MIN_HIDDEN_LAYERS,
         MODELS_DIR,
+        STATE_ENCODING_INTEGER,
         TrainConfig,
         chunked_mean,
         default_model_path,
         make_game,
+        parse_hidden_layer_widths,
         run_episode,
     )
 except ImportError:
@@ -38,11 +42,15 @@ except ImportError:
     from utils import (
         APPLE_CHOICES,
         BOARD_SIZES,
+        MAX_HIDDEN_LAYERS,
+        MIN_HIDDEN_LAYERS,
         MODELS_DIR,
+        STATE_ENCODING_INTEGER,
         TrainConfig,
         chunked_mean,
         default_model_path,
         make_game,
+        parse_hidden_layer_widths,
         run_episode,
     )
 
@@ -106,6 +114,8 @@ class TrainingDashboard:
 
         self.board_var = tk.StringVar(value=str(self.cfg.board_size))
         self.apple_var = tk.StringVar(value=str(self.cfg.apples))
+        self.hidden_layer_count_var = tk.StringVar(value=str(len(self.cfg.hidden_layers)))
+        self.neurons_var = tk.StringVar(value=self._format_hidden_layers_for_ui(self.cfg.hidden_layers))
         self.anim_delay_var = tk.DoubleVar(value=0.0)
         self.snake_head_color_var = tk.StringVar(value="#45d483")
         self.snake_body_color_var = tk.StringVar(value="#1fb86b")
@@ -123,6 +133,8 @@ class TrainingDashboard:
 
         self._add_dropdown(left_col, "Board", self.board_var, [str(v) for v in BOARD_SIZES])
         self._add_dropdown(left_col, "Apples", self.apple_var, [str(v) for v in APPLE_CHOICES])
+        self._add_entry(left_col, "Hidden layers", self.hidden_layer_count_var)
+        self._add_entry(left_col, "Neurons/layer", self.neurons_var)
         self._add_info(right_col, "Policy", "Backend phase scheduler")
         self._add_info(right_col, "Gamma/N-step", "Automatic curriculum")
         self._add_info(right_col, "Rewards/LR/Epsilon", "Automatic curriculum")
@@ -297,6 +309,22 @@ class TrainingDashboard:
             cursor="hand2",
         )
 
+    @staticmethod
+    def _format_hidden_layers_for_ui(hidden_layers: tuple[int, ...]) -> str:
+        if len(set(hidden_layers)) == 1:
+            return str(hidden_layers[0])
+        return ",".join(str(width) for width in hidden_layers)
+
+    @staticmethod
+    def _parse_int_in_range(raw: str, name: str, min_value: int, max_value: int) -> int:
+        try:
+            value = int(raw)
+        except ValueError:
+            raise ValueError(f"{name} must be an integer.")
+        if not (min_value <= value <= max_value):
+            raise ValueError(f"{name} must be between {min_value} and {max_value}.")
+        return value
+
     def _validate_hex_color(self, value: str, name: str) -> str:
         if len(value) == 7 and value.startswith("#"):
             hex_part = value[1:]
@@ -314,9 +342,19 @@ class TrainingDashboard:
         self.canvas.configure(bg=self.board_bg_color)
 
     def _read_cfg_from_ui(self) -> TrainConfig:
-        board_size = int(self.board_var.get())
-        apples = int(self.apple_var.get())
-        anim_delay_ms = float(self.anim_delay_var.get())
+        board_size = self._parse_int_in_range(self.board_var.get().strip(), "Board size", min(BOARD_SIZES), max(BOARD_SIZES))
+        apples = self._parse_int_in_range(self.apple_var.get().strip(), "Apples", min(APPLE_CHOICES), max(APPLE_CHOICES))
+        hidden_layer_count = self._parse_int_in_range(
+            self.hidden_layer_count_var.get().strip(),
+            "Hidden layers",
+            MIN_HIDDEN_LAYERS,
+            MAX_HIDDEN_LAYERS,
+        )
+        hidden_layers = parse_hidden_layer_widths(hidden_layer_count, self.neurons_var.get())
+        try:
+            anim_delay_ms = float(self.anim_delay_var.get())
+        except (TypeError, ValueError):
+            raise ValueError("Animation delay must be a number.")
 
         if board_size not in BOARD_SIZES:
             raise ValueError("Board size must be 10, 20, 30, or 40.")
@@ -329,11 +367,17 @@ class TrainingDashboard:
             TrainConfig(),
             board_size=board_size,
             apples=apples,
+            hidden_layers=hidden_layers,
+            state_encoding=STATE_ENCODING_INTEGER,
             step_delay=anim_delay_ms / 1000.0,
         )
 
     def _sync_agent_to_cfg(self, cfg: TrainConfig) -> None:
-        if cfg.board_size != self.cfg.board_size or cfg.state_encoding != self.cfg.state_encoding:
+        if (
+            cfg.board_size != self.cfg.board_size
+            or cfg.state_encoding != self.cfg.state_encoding
+            or cfg.hidden_layers != self.cfg.hidden_layers
+        ):
             self.cfg = cfg
             self.agent = SnakeDQNAgent(cfg)
             return
@@ -678,15 +722,21 @@ class TrainingDashboard:
             self.board_var.set(str(board_size))
 
             cfg_data = metadata.get("cfg", {})
-            state_encoding = str(metadata.get("state_encoding", cfg_data.get("state_encoding", self.cfg.state_encoding)))
-            if state_encoding not in {"compact11", "board"}:
+            state_encoding = str(metadata.get("state_encoding", cfg_data.get("state_encoding", STATE_ENCODING_INTEGER)))
+            if state_encoding == "compact11":
+                state_encoding = STATE_ENCODING_INTEGER
+            if state_encoding != STATE_ENCODING_INTEGER:
                 raise ValueError(f"Unsupported state encoding in model: {state_encoding}")
             apples = int(cfg_data.get("apples", self.apple_var.get()))
             if apples in APPLE_CHOICES:
                 self.apple_var.set(str(apples))
+            hidden_layers = metadata.get("hidden_layers", self.cfg.hidden_layers)
+            if not isinstance(hidden_layers, tuple):
+                hidden_layers = tuple(int(v) for v in hidden_layers)
+            self.hidden_layer_count_var.set(str(len(hidden_layers)))
+            self.neurons_var.set(self._format_hidden_layers_for_ui(hidden_layers))
 
             cfg = self._read_cfg_from_ui()
-            cfg = replace(cfg, state_encoding=state_encoding)
             self._sync_agent_to_cfg(cfg)
             self.agent.load(path)
 

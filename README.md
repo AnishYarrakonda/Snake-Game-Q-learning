@@ -35,14 +35,16 @@ Useful options:
 
 ```bash
 python3 train_offline.py --board-size 20 --apples 3
+python3 train_offline.py --board-size 20 --apples 3 --hidden-layers 3 --neurons 256,128,64
 python3 train_offline.py --no-plot
-python3 train_offline.py --load models/snake_dqn_board_20x20.pt --save models/my_model.pt
+python3 train_offline.py --load models/snake_dqn_integer12_20x20.pt --save models/my_model.pt
 ```
 
 This trains the model and saves a `.pt` file
-(default: `models/snake_dqn_compact11_<board>x<board>.pt`).
+(default: `models/snake_dqn_integer12_<board>x<board>.pt`).
 Backend defaults now control strategy automatically (gamma, n-step returns, reward weighting,
 epsilon schedule, learning-rate schedule, and target update behavior).
+State encoding is integer-feature based (compact vector), and output actions are fixed to 4 directions.
 
 Plot behavior:
 - top subplot: average length per 10 episodes (simple line)
@@ -61,6 +63,7 @@ python3 training_dashboard.py
 Inside the dashboard:
 - `Train`: trains the agent and shows board + live episode graph
 - `Watch`: runs the model in play mode (`epsilon=0`) so you can watch it play
+- `Hidden layers` + `Neurons/layer`: choose network depth/width (single width or comma list)
 - `Anim delay (ms)` slider: controls animation speed in training/watch playback
 - Most learning hyperparameters are backend-controlled by curriculum (not exposed in UI)
 - `Visual Theme`: customize snake/apple/grid/background/border colors using hex or color picker

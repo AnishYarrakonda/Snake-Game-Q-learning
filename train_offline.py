@@ -21,10 +21,14 @@ try:
     from .utils import (
         APPLE_CHOICES,
         BOARD_SIZES,
+        MAX_HIDDEN_LAYERS,
+        MIN_HIDDEN_LAYERS,
+        STATE_ENCODING_INTEGER,
         TrainConfig,
         chunked_mean,
         default_model_path,
         make_game,
+        parse_hidden_layer_widths,
         run_episode,
     )
 except ImportError:
@@ -32,10 +36,14 @@ except ImportError:
     from utils import (
         APPLE_CHOICES,
         BOARD_SIZES,
+        MAX_HIDDEN_LAYERS,
+        MIN_HIDDEN_LAYERS,
+        STATE_ENCODING_INTEGER,
         TrainConfig,
         chunked_mean,
         default_model_path,
         make_game,
+        parse_hidden_layer_widths,
         run_episode,
     )
 
@@ -212,9 +220,22 @@ def train_offline(
 
 def parse_args() -> argparse.Namespace:
     defaults = TrainConfig()
+    default_hidden_neurons = str(defaults.hidden_layers[0])
     parser = argparse.ArgumentParser(description="Offline Snake DQN training")
     parser.add_argument("--board-size", type=int, default=defaults.board_size, choices=BOARD_SIZES)
     parser.add_argument("--apples", type=int, default=defaults.apples, choices=APPLE_CHOICES)
+    parser.add_argument(
+        "--hidden-layers",
+        type=int,
+        default=len(defaults.hidden_layers),
+        help=f"Number of hidden layers ({MIN_HIDDEN_LAYERS}-{MAX_HIDDEN_LAYERS}).",
+    )
+    parser.add_argument(
+        "--neurons",
+        type=str,
+        default=default_hidden_neurons,
+        help="Neurons per layer: one integer for all layers, or comma-separated widths matching --hidden-layers.",
+    )
     parser.add_argument("--load", type=str, default="")
     parser.add_argument("--save", type=str, default="")
     parser.add_argument(
@@ -232,12 +253,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--interactive",
         action="store_true",
-        help="Prompt for settings in the terminal (board/apples/plot/load).",
+        help="Prompt for settings in the terminal (board/apples/architecture/plot/load).",
     )
     return parser.parse_args()
 
 
-def _prompt_int(label: str, default: int, choices: tuple[int, ...] | None = None, min_value: int | None = None) -> int:
+def _prompt_int(
+    label: str,
+    default: int,
+    choices: tuple[int, ...] | None = None,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
     while True:
         options = f" {choices}" if choices else ""
         raw = input(f"{label}{options} [{default}]: ").strip()
@@ -254,6 +281,9 @@ def _prompt_int(label: str, default: int, choices: tuple[int, ...] | None = None
             continue
         if min_value is not None and value < min_value:
             print(f"Value must be >= {min_value}")
+            continue
+        if max_value is not None and value > max_value:
+            print(f"Value must be <= {max_value}")
             continue
         return value
 
@@ -292,6 +322,38 @@ def _prompt_bool(label: str, default: bool) -> bool:
         print("Enter y or n.")
 
 
+def _format_hidden_layers_for_prompt(hidden_layers: tuple[int, ...]) -> str:
+    if len(set(hidden_layers)) == 1:
+        return str(hidden_layers[0])
+    return ",".join(str(width) for width in hidden_layers)
+
+
+def _prompt_hidden_layers(default_layers: tuple[int, ...]) -> tuple[int, ...]:
+    layer_count = _prompt_int(
+        "Hidden layers",
+        len(default_layers),
+        min_value=MIN_HIDDEN_LAYERS,
+        max_value=MAX_HIDDEN_LAYERS,
+    )
+    single_default = default_layers[0]
+    if len(default_layers) == layer_count:
+        neurons_default = _format_hidden_layers_for_prompt(default_layers)
+    else:
+        neurons_default = str(single_default)
+
+    while True:
+        raw = input(
+            f"Neurons per layer (single int or {layer_count} comma-separated ints) [{neurons_default}]: "
+        ).strip()
+        raw_l = raw.lower()
+        if raw == "" or raw_l == "default":
+            raw = neurons_default
+        try:
+            return parse_hidden_layer_widths(layer_count, raw)
+        except ValueError as exc:
+            print(exc)
+
+
 def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
     default_cfg = TrainConfig()
     print("\nSnake offline training setup")
@@ -305,6 +367,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
 
     board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
+    hidden_layers = _prompt_hidden_layers(default_cfg.hidden_layers)
     show_plot = _prompt_bool("Show live matplotlib plot", False)
     print_every = _prompt_int("Print stats every N episodes", 25, min_value=1)
     show_final_trend_plot = _prompt_bool("Show end trend plot when live plot is off", True)
@@ -313,7 +376,8 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
     cfg = TrainConfig(
         board_size=board_size,
         apples=apples,
-        state_encoding=default_cfg.state_encoding,
+        hidden_layers=hidden_layers,
+        state_encoding=STATE_ENCODING_INTEGER,
     )
     load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
     return cfg, load_path, show_plot, print_every, show_final_trend_plot
@@ -345,10 +409,15 @@ def run_offline_training_cli() -> None:
         cfg, load_path, show_plot, print_every, show_final_trend_plot = prompt_train_config()
         save_path = None
     else:
+        try:
+            hidden_layers = parse_hidden_layer_widths(args.hidden_layers, args.neurons)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid hidden layer settings: {exc}")
         cfg = TrainConfig(
             board_size=args.board_size,
             apples=args.apples,
-            state_encoding=TrainConfig().state_encoding,
+            hidden_layers=hidden_layers,
+            state_encoding=STATE_ENCODING_INTEGER,
         )
         load_path = args.load if args.load else None
         save_path = args.save if args.save else None
