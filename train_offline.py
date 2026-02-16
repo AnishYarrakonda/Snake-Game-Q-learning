@@ -126,17 +126,24 @@ def train_offline(
     print(f"\nUsing device: {agent.device}\n")
 
     header = (
-        f"{'Episodes':^18}"
-        f"{'Last':^10}"
-        f"{'Avg':^10}"
-        f"{'Median':^10}"
-        f"{'Max':^10}"
-        f"{'Max500':^10}"
-        f"{'AvgStep':^10}"
-        f"{'Epsilon':^12}"
-        f"{'MeanQ':^10}"
-        f"{'TDerr':^10}"
+        f"{'Episodes':<18}"
+        f"{'Last':>6}"
+        f"{'Avg':>8}"
+        f"{'Med':>8}"
+        f"{'Max':>6}"
+        f"{'Max500':>8}"
+        f"{'Steps':>8}"
+        f"{'Eps':>8}"
+        f"{'MeanQ':>9}"
+        f"{'TDerr':>9}"
+        f"{'FoodR':>9}"
+        f"{'SurvR':>9}"
+        f"{'Bonus':>9}"
+        f"{'Loss':>10}"
+        f"{'TotR':>9}"
+        f"{'QExp':>6}"
     )
+
     print(header)
     print("-" * len(header))
 
@@ -203,32 +210,27 @@ def train_offline(
             chunk_median_scores.append(median_chunk)
             range_start = episode - len(recent_chunk) + 1
             episode_label = f"{range_start}-{episode}/{cfg.episodes}"
+            
             row = (
-                f"{episode_label:^18}"
-                f"{score:^10.0f}"
-                f"{avg_chunk:^10.2f}"
-                f"{median_chunk:^10.2f}"
-                f"{max_chunk:^10.0f}"
-                f"{max_rolling_500:^10.0f}"
-                f"{avg_steps:^10.1f}"
-                f"{agent.epsilon:^12.4f}"
-                f"{avg_q:^10.2f}"
-                f"{avg_td:^10.3f}"
+                f"{episode_label:<18}"
+                f"{score:>6.0f}"
+                f"{avg_chunk:>8.2f}"
+                f"{median_chunk:>8.2f}"
+                f"{max_chunk:>6.0f}"
+                f"{max_rolling_500:>8.0f}"
+                f"{avg_steps:>8.1f}"
+                f"{agent.epsilon:>8.4f}"
+                f"{avg_q:>9.2f}"
+                f"{avg_td:>9.3f}"
+                f"{avg_food:>9.3f}"
+                f"{avg_survival:>9.3f}"
+                f"{avg_bonus:>9.3f}"
+                f"{avg_loss:>10.4f}"
+                f"{avg_reward:>9.3f}"
+                f"{chunk_q_explodes:>6}"
             )
+
             print(row)
-            print(
-                f"{'':18}"
-                f"{'FoodR':>8}:{avg_food:<8.3f}"
-                f"{'SurvR':>8}:{avg_survival:<8.3f}"
-                f"{'TBonus':>8}:{avg_bonus:<8.3f}"
-                f"{'Loss':>8}:{avg_loss:<8.4f}"
-                f"{'Reward':>8}:{avg_reward:<8.3f}"
-            )
-            if chunk_q_explodes > 0:
-                print(
-                    f"Warning: detected {chunk_q_explodes} episodes with |Q| > {cfg.q_explosion_threshold:.1f} "
-                    f"in this chunk."
-                )
             print()
 
     if save_path:
