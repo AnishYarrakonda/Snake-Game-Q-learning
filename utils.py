@@ -31,15 +31,15 @@ class TrainConfig:
     apples: int = 3
     episodes: int = 3000
     max_steps: int = 1200
-    gamma: float = 0.95
-    lr: float = 0.0008
+    gamma: float = 0.97
+    lr: float = 0.001
     epsilon_start: float = 1.0
-    epsilon_min: float = 0.05
-    epsilon_decay: float = 0.997
-    batch_size: int = 512
-    memory_size: int = 100_000
+    epsilon_min: float = 0.03
+    epsilon_decay: float = 0.996
+    batch_size: int = 256
+    memory_size: int = 80_000
     hidden_dim: int = 256
-    target_update_every: int = 250
+    target_update_every: int = 200
     step_delay: float = 0.0
     distance_reward_shaping: bool = True
 
@@ -73,11 +73,11 @@ def encode_state(game: SnakeGame, board_size: int) -> np.ndarray:
     for x, y in game.apples:
         board[y, x] = 0.5
 
-    for x, y in list(game.snake)[1:]:
-        board[y, x] = -0.5
-
-    head_x, head_y = game.snake[0]
-    board[head_y, head_x] = 1.0
+    for idx, (x, y) in enumerate(game.snake):
+        if idx == 0:
+            board[y, x] = 1.0
+        else:
+            board[y, x] = -0.5
 
     return board.reshape(-1)
 
@@ -92,6 +92,50 @@ def nearest_apple_distance(game: SnakeGame) -> int:
         if dist < best:
             best = dist
     return best
+
+
+def chunked_episode_stats(
+    values: list[float],
+    chunk_size: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute per-chunk summaries for plotting.
+    Returns:
+    - x_end: episode index at each chunk end
+    - mean
+    - median
+    - q1 (25th percentile)
+    - q3 (75th percentile)
+    """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be > 0")
+
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.size == 0:
+        empty = np.array([], dtype=np.float32)
+        return empty, empty, empty, empty, empty
+
+    x_end: list[float] = []
+    means: list[float] = []
+    medians: list[float] = []
+    q1s: list[float] = []
+    q3s: list[float] = []
+
+    for start in range(0, arr.size, chunk_size):
+        chunk = arr[start : start + chunk_size]
+        x_end.append(float(start + chunk.size))
+        means.append(float(np.mean(chunk)))
+        medians.append(float(np.median(chunk)))
+        q1s.append(float(np.percentile(chunk, 25)))
+        q3s.append(float(np.percentile(chunk, 75)))
+
+    return (
+        np.asarray(x_end, dtype=np.float32),
+        np.asarray(means, dtype=np.float32),
+        np.asarray(medians, dtype=np.float32),
+        np.asarray(q1s, dtype=np.float32),
+        np.asarray(q3s, dtype=np.float32),
+    )
 
 
 def make_game(cfg: TrainConfig) -> SnakeGame:
@@ -117,6 +161,8 @@ def run_episode(
     """Run one episode and optionally train the agent online from each transition."""
     game = make_game(cfg)
     total_reward = 0.0
+    steps_taken = 0
+    board_capacity = cfg.board_size * cfg.board_size
 
     for step in range(cfg.max_steps):
         if stop_flag and stop_flag.is_set():
@@ -134,12 +180,15 @@ def run_episode(
         alive = game.move()
 
         new_length = len(game.snake)
+        won = bool(getattr(game, "won", False)) or (new_length >= board_capacity)
         new_distance = nearest_apple_distance(game) if cfg.distance_reward_shaping else 0
 
         # Reward shaping gives the agent denser feedback than apple/death only.
         reward = 0.01
         if not alive:
             reward = -1.0
+        elif won:
+            reward = 2.0
         elif new_length > old_length:
             reward = 1.0
         elif cfg.distance_reward_shaping:
@@ -148,7 +197,7 @@ def run_episode(
             elif new_distance > old_distance:
                 reward -= 0.03
 
-        done = not alive
+        done = (not alive) or won
         next_state = encode_state(game, cfg.board_size)
 
         if train:
@@ -163,7 +212,8 @@ def run_episode(
         if cfg.step_delay > 0:
             time.sleep(cfg.step_delay)
 
+        steps_taken = step + 1
         if done:
             break
 
-    return len(game.snake), total_reward, step + 1 #type: ignore
+    return len(game.snake), total_reward, steps_taken

@@ -378,6 +378,12 @@ class SnakeApp:
             self.draw()
             return
 
+        if self.game.won:
+            self.game.running = False
+            self.state_var.set("State: You Win")
+            self.draw()
+            return
+
         self.draw()
         self.after_id = self.root.after(self.config.speed_ms, self.tick)
 
@@ -410,6 +416,24 @@ class SnakeApp:
             self.canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline="")
 
         self.length_var.set(f"Length: {len(self.game.snake)}")
+
+        if self.game.won:
+            side = size * cell
+            self.canvas.create_rectangle(0, 0, side, side, fill="#000000", stipple="gray50", outline="")
+            self.canvas.create_text(
+                side // 2,
+                side // 2 - 12,
+                text="You Win",
+                fill=self.TEXT_PRIMARY,
+                font=("Helvetica", 22, "bold"),
+            )
+            self.canvas.create_text(
+                side // 2,
+                side // 2 + 20,
+                text="Press Reset or Start",
+                fill=self.TEXT_MUTED,
+                font=("Helvetica", 12),
+            )
 
         if not self.game.alive:
             side = size * cell

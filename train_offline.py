@@ -17,10 +17,69 @@ import numpy as np
 
 try:
     from .agent import SnakeDQNAgent
-    from .utils import APPLE_CHOICES, BOARD_SIZES, TrainConfig, default_model_path, run_episode
+    from .utils import APPLE_CHOICES, BOARD_SIZES, TrainConfig, chunked_episode_stats, default_model_path, run_episode
 except ImportError:
     from agent import SnakeDQNAgent
-    from utils import APPLE_CHOICES, BOARD_SIZES, TrainConfig, default_model_path, run_episode
+    from utils import APPLE_CHOICES, BOARD_SIZES, TrainConfig, chunked_episode_stats, default_model_path, run_episode
+
+
+def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[float]) -> None:
+    ax_trend.clear()
+    ax_trend.set_title("Training Trend (Aggregated)")
+    ax_trend.set_xlabel("Episode")
+    ax_trend.set_ylabel("Length")
+    ax_trend.grid(alpha=0.25)
+
+    x50, mean50, _, _, _ = chunked_episode_stats(scores, chunk_size=50)
+    x25, _, median25, q1_25, q3_25 = chunked_episode_stats(scores, chunk_size=25)
+
+    if x50.size > 0:
+        ax_trend.plot(
+            x50,
+            mean50,
+            color="#1f77b4",
+            linewidth=2.2,
+            marker="o",
+            markersize=3,
+            label="Mean length (per 50 episodes)",
+        )
+    if x25.size > 0:
+        ax_trend.plot(
+            x25,
+            median25,
+            color="#ff7f0e",
+            linewidth=2.0,
+            label="Median length (per 25 episodes)",
+        )
+        ax_trend.fill_between(
+            x25,
+            q1_25,
+            q3_25,
+            color="#ff7f0e",
+            alpha=0.22,
+            label="IQR (25th-75th percentile)",
+        )
+    handles, labels = ax_trend.get_legend_handles_labels()
+    if handles:
+        ax_trend.legend(loc="upper left")
+
+    ax_hist.clear()
+    ax_hist.set_title("Episode Length Distribution")
+    ax_hist.set_xlabel("Length")
+    ax_hist.set_ylabel("Count")
+    ax_hist.grid(alpha=0.2)
+
+    if scores:
+        max_score = int(max(scores))
+        bins = np.arange(0.5, max_score + 1.5, 1.0)
+        ax_hist.hist(scores, bins=bins, color="#44b5a4", alpha=0.85, edgecolor="#17323a")
+        mean_all = float(np.mean(scores))
+        median_all = float(np.median(scores))
+        ax_hist.axvline(mean_all, color="#1f77b4", linestyle="--", linewidth=1.6, label=f"Mean: {mean_all:.2f}")
+        ax_hist.axvline(median_all, color="#ff7f0e", linestyle="-", linewidth=1.6, label=f"Median: {median_all:.2f}")
+        handles, labels = ax_hist.get_legend_handles_labels()
+        if handles:
+            ax_hist.legend(loc="upper right")
 
 
 def train_offline(
@@ -37,18 +96,12 @@ def train_offline(
         agent.load(load_path)
 
     scores: list[float] = []
-    avg_scores: list[float] = []
+    avg50_scores: list[float] = []
 
     if show_plot:
         plt.ion()
-        fig, ax = plt.subplots(figsize=(9, 5))
-        current_line, = ax.plot([], [], label="Current Length", color="#1f77b4")
-        avg_line, = ax.plot([], [], label="Average Length", color="#ff7f0e")
-        ax.set_xlabel("Episode")
-        ax.set_ylabel("Length")
-        ax.set_title("Snake Training")
-        ax.legend(loc="upper left")
-        ax.grid(alpha=0.25)
+        fig, (ax_trend, ax_hist) = plt.subplots(2, 1, figsize=(10, 8))
+        fig.subplots_adjust(hspace=0.35)
 
     for episode in range(1, cfg.episodes + 1):
         if stop_flag and stop_flag.is_set():
@@ -56,20 +109,16 @@ def train_offline(
 
         score, _, _ = run_episode(agent, cfg, train=True, stop_flag=stop_flag)
         scores.append(float(score))
-        avg = float(np.mean(scores))
-        avg_scores.append(avg)
+        avg50 = float(np.mean(scores[-50:]))
+        avg50_scores.append(avg50)
 
         agent.decay_epsilon()
 
         if episode_callback:
-            episode_callback(episode, float(score), avg, float(agent.epsilon))
+            episode_callback(episode, float(score), avg50, float(agent.epsilon))
 
-        if show_plot and (episode == 1 or episode % 10 == 0 or episode == cfg.episodes):
-            x = np.arange(1, len(scores) + 1)
-            current_line.set_data(x, scores) #type: ignore
-            avg_line.set_data(x, avg_scores) #type: ignore
-            ax.relim() #type: ignore
-            ax.autoscale_view() #type: ignore
+        if show_plot and (episode == 1 or episode % 25 == 0 or episode == cfg.episodes):
+            _update_progress_plots(ax_trend, ax_hist, scores)
             fig.canvas.draw_idle() #type: ignore
             fig.canvas.flush_events() #type: ignore
             plt.pause(0.001)
@@ -77,28 +126,30 @@ def train_offline(
         if episode % 50 == 0:
             print(
                 f"Episode {episode}/{cfg.episodes} | "
-                f"Length: {score:.0f} | Avg: {avg:.2f} | Epsilon: {agent.epsilon:.4f}"
+                f"Length: {score:.0f} | Avg50: {avg50:.2f} | Epsilon: {agent.epsilon:.4f}"
             )
 
     out_path = save_path or default_model_path(cfg.board_size)
     agent.save(out_path)
 
     if show_plot:
+        _update_progress_plots(ax_trend, ax_hist, scores)
         plt.ioff()
         plt.show()
 
-    return agent, scores, avg_scores
+    return agent, scores, avg50_scores
 
 
 def parse_args() -> argparse.Namespace:
+    defaults = TrainConfig()
     parser = argparse.ArgumentParser(description="Offline Snake DQN training")
-    parser.add_argument("--board-size", type=int, default=20, choices=BOARD_SIZES)
-    parser.add_argument("--apples", type=int, default=3, choices=APPLE_CHOICES)
-    parser.add_argument("--episodes", type=int, default=3000)
-    parser.add_argument("--max-steps", type=int, default=1200)
-    parser.add_argument("--epsilon-decay", type=float, default=0.997)
-    parser.add_argument("--epsilon-min", type=float, default=0.05)
-    parser.add_argument("--lr", type=float, default=0.0008)
+    parser.add_argument("--board-size", type=int, default=defaults.board_size, choices=BOARD_SIZES)
+    parser.add_argument("--apples", type=int, default=defaults.apples, choices=APPLE_CHOICES)
+    parser.add_argument("--episodes", type=int, default=defaults.episodes)
+    parser.add_argument("--max-steps", type=int, default=defaults.max_steps)
+    parser.add_argument("--epsilon-decay", type=float, default=defaults.epsilon_decay)
+    parser.add_argument("--epsilon-min", type=float, default=defaults.epsilon_min)
+    parser.add_argument("--lr", type=float, default=defaults.lr)
     parser.add_argument("--load", type=str, default="")
     parser.add_argument("--save", type=str, default="")
     parser.add_argument("--no-plot", action="store_true", help="Disable matplotlib live plot")
@@ -167,22 +218,23 @@ def _prompt_bool(label: str, default: bool) -> bool:
 
 
 def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
+    default_cfg = TrainConfig()
     print("\nSnake offline training setup")
     print("Press Enter to keep defaults.\n")
     print("Tip: type 'default' at the first prompt to skip all setup.\n")
 
     first = input("Quick start: press Enter to configure, or type 'default' to run with all defaults: ").strip().lower()
     if first == "default":
-        return TrainConfig(), None, None, True
+        return default_cfg, None, None, True
 
-    board_size = _prompt_int("Board size", 20, choices=BOARD_SIZES)
-    apples = _prompt_int("Apples", 3, choices=APPLE_CHOICES)
-    episodes = _prompt_int("Episodes", 3000, min_value=1)
-    max_steps = _prompt_int("Max steps per episode", 1200, min_value=1)
-    epsilon_decay = _prompt_float("Epsilon decay", 0.997, min_value=0.9, max_value=0.99999)
-    epsilon_min = _prompt_float("Epsilon min", 0.05, min_value=0.0, max_value=1.0)
-    lr = _prompt_float("Learning rate", 0.0008, min_value=1e-8)
-    use_distance_shaping = _prompt_bool("Use distance-based reward shaping", True)
+    board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
+    apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
+    episodes = _prompt_int("Episodes", default_cfg.episodes, min_value=1)
+    max_steps = _prompt_int("Max steps per episode", default_cfg.max_steps, min_value=1)
+    epsilon_decay = _prompt_float("Epsilon decay", default_cfg.epsilon_decay, min_value=0.9, max_value=0.99999)
+    epsilon_min = _prompt_float("Epsilon min", default_cfg.epsilon_min, min_value=0.0, max_value=1.0)
+    lr = _prompt_float("Learning rate", default_cfg.lr, min_value=1e-8)
+    use_distance_shaping = _prompt_bool("Use distance-based reward shaping", default_cfg.distance_reward_shaping)
     show_plot = _prompt_bool("Show live matplotlib plot", True)
 
     load_raw = input("Model to load (.pt), blank for none: ").strip()
@@ -198,8 +250,8 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
         lr=lr,
         distance_reward_shaping=use_distance_shaping,
     )
-    load_path = load_raw or None
-    save_path = save_raw or None
+    load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
+    save_path = None if save_raw == "" or save_raw.lower() == "default" else save_raw
     return cfg, load_path, save_path, show_plot
 
 

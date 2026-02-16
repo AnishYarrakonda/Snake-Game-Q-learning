@@ -1,6 +1,7 @@
 # Tkinter training dashboard with live board view + live matplotlib training graph.
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import replace
 import os
 import queue
@@ -26,6 +27,7 @@ try:
         BOARD_SIZES,
         MODELS_DIR,
         TrainConfig,
+        chunked_episode_stats,
         default_model_path,
         run_episode,
     )
@@ -37,6 +39,7 @@ except ImportError:
         BOARD_SIZES,
         MODELS_DIR,
         TrainConfig,
+        chunked_episode_stats,
         default_model_path,
         run_episode,
     )
@@ -59,7 +62,6 @@ class TrainingDashboard:
         self.agent = SnakeDQNAgent(self.cfg)
 
         self.scores: list[float] = []
-        self.avg_scores: list[float] = []
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -87,13 +89,13 @@ class TrainingDashboard:
         )
         controls.pack(fill="x")
 
-        self.board_var = tk.StringVar(value="20")
-        self.apple_var = tk.StringVar(value="3")
-        self.episodes_var = tk.StringVar(value="3000")
-        self.max_steps_var = tk.StringVar(value="1200")
-        self.eps_decay_var = tk.StringVar(value="0.997")
-        self.eps_min_var = tk.StringVar(value="0.05")
-        self.lr_var = tk.StringVar(value="0.0008")
+        self.board_var = tk.StringVar(value=str(self.cfg.board_size))
+        self.apple_var = tk.StringVar(value=str(self.cfg.apples))
+        self.episodes_var = tk.StringVar(value=str(self.cfg.episodes))
+        self.max_steps_var = tk.StringVar(value=str(self.cfg.max_steps))
+        self.eps_decay_var = tk.StringVar(value=str(self.cfg.epsilon_decay))
+        self.eps_min_var = tk.StringVar(value=str(self.cfg.epsilon_min))
+        self.lr_var = tk.StringVar(value=str(self.cfg.lr))
 
         self._add_dropdown(controls, "Board", self.board_var, [str(v) for v in BOARD_SIZES])
         self._add_dropdown(controls, "Apples", self.apple_var, [str(v) for v in APPLE_CHOICES])
@@ -125,16 +127,10 @@ class TrainingDashboard:
         self.canvas = tk.Canvas(left, bg="#1c2229", width=700, height=700, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
-        fig = plt.Figure(figsize=(7, 5), dpi=100) #type: ignore
-        self.ax = fig.add_subplot(111)
-        self.ax.set_title("Episode Length")
-        self.ax.set_xlabel("Episode")
-        self.ax.set_ylabel("Length")
-        self.ax.grid(alpha=0.25)
-
-        self.current_line, = self.ax.plot([], [], label="Current Length", color="#1f77b4")
-        self.avg_line, = self.ax.plot([], [], label="Average Length", color="#ff7f0e")
-        self.ax.legend(loc="upper left")
+        fig = plt.Figure(figsize=(7, 7), dpi=100) #type: ignore
+        self.ax_trend = fig.add_subplot(211)
+        self.ax_hist = fig.add_subplot(212)
+        fig.subplots_adjust(hspace=0.4)
 
         self.plot_canvas = FigureCanvasTkAgg(fig, master=right)
         self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
@@ -240,17 +236,66 @@ class TrainingDashboard:
             )
 
     def _update_plot(self) -> None:
+        self.ax_trend.clear()
+        self.ax_trend.set_title("Training Trend (Aggregated)")
+        self.ax_trend.set_xlabel("Episode")
+        self.ax_trend.set_ylabel("Length")
+        self.ax_trend.grid(alpha=0.25)
+
+        self.ax_hist.clear()
+        self.ax_hist.set_title("Episode Length Distribution")
+        self.ax_hist.set_xlabel("Length")
+        self.ax_hist.set_ylabel("Count")
+        self.ax_hist.grid(alpha=0.2)
+
         if not self.scores:
-            self.current_line.set_data([], [])
-            self.avg_line.set_data([], [])
             self.plot_canvas.draw_idle()
             return
 
-        x = np.arange(1, len(self.scores) + 1)
-        self.current_line.set_data(x, self.scores)
-        self.avg_line.set_data(x, self.avg_scores)
-        self.ax.relim()
-        self.ax.autoscale_view()
+        x50, mean50, _, _, _ = chunked_episode_stats(self.scores, chunk_size=50)
+        x25, _, median25, q1_25, q3_25 = chunked_episode_stats(self.scores, chunk_size=25)
+
+        if x50.size > 0:
+            self.ax_trend.plot(
+                x50,
+                mean50,
+                color="#1f77b4",
+                linewidth=2.2,
+                marker="o",
+                markersize=3,
+                label="Mean length (per 50 episodes)",
+            )
+        if x25.size > 0:
+            self.ax_trend.plot(
+                x25,
+                median25,
+                color="#ff7f0e",
+                linewidth=2.0,
+                label="Median length (per 25 episodes)",
+            )
+            self.ax_trend.fill_between(
+                x25,
+                q1_25,
+                q3_25,
+                color="#ff7f0e",
+                alpha=0.22,
+                label="IQR (25th-75th percentile)",
+            )
+        handles, labels = self.ax_trend.get_legend_handles_labels()
+        if handles:
+            self.ax_trend.legend(loc="upper left")
+
+        max_score = int(max(self.scores))
+        bins = np.arange(0.5, max_score + 1.5, 1.0)
+        self.ax_hist.hist(self.scores, bins=bins, color="#44b5a4", alpha=0.85, edgecolor="#17323a")
+        mean_all = float(np.mean(self.scores))
+        median_all = float(np.median(self.scores))
+        self.ax_hist.axvline(mean_all, color="#1f77b4", linestyle="--", linewidth=1.6, label=f"Mean: {mean_all:.2f}")
+        self.ax_hist.axvline(median_all, color="#ff7f0e", linestyle="-", linewidth=1.6, label=f"Median: {median_all:.2f}")
+        handles, labels = self.ax_hist.get_legend_handles_labels()
+        if handles:
+            self.ax_hist.legend(loc="upper right")
+
         self.plot_canvas.draw_idle()
 
     def _poll_queue(self) -> None:
@@ -270,10 +315,9 @@ class TrainingDashboard:
                     total = int(msg["total"])
 
                     self.scores.append(score)
-                    self.avg_scores.append(avg)
                     self._update_plot()
                     self.status_var.set(
-                        f"Episode {episode}/{total} | Length: {score:.0f} | Avg: {avg:.2f} | Epsilon: {epsilon:.4f}"
+                        f"Episode {episode}/{total} | Length: {score:.0f} | Avg50: {avg:.2f} | Epsilon: {epsilon:.4f}"
                     )
 
                 elif mtype == "done":
@@ -300,7 +344,6 @@ class TrainingDashboard:
 
     def _clear_series(self) -> None:
         self.scores.clear()
-        self.avg_scores.clear()
         self._update_plot()
 
     def start_training(self) -> None:
@@ -315,7 +358,7 @@ class TrainingDashboard:
 
         def worker() -> None:
             try:
-                running_sum = 0.0
+                recent_scores: deque[float] = deque(maxlen=50)
 
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
                     if self.stop_event.is_set():
@@ -344,8 +387,8 @@ class TrainingDashboard:
                     )
                     self.agent.decay_epsilon()
 
-                    running_sum += score
-                    avg = running_sum / episode
+                    recent_scores.append(float(score))
+                    avg = float(np.mean(recent_scores))
 
                     self.msg_queue.put(
                         {
@@ -376,12 +419,12 @@ class TrainingDashboard:
         self._clear_series()
 
         def worker() -> None:
+            saved_epsilon = self.agent.epsilon
             try:
                 watch_cfg = replace(cfg, step_delay=0.05)
-                saved_epsilon = self.agent.epsilon
                 self.agent.epsilon = 0.0
 
-                running_sum = 0.0
+                recent_scores: deque[float] = deque(maxlen=50)
                 max_watch_episodes = 100000
 
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
@@ -410,8 +453,8 @@ class TrainingDashboard:
                         stop_flag=self.stop_event,
                     )
 
-                    running_sum += score
-                    avg = running_sum / episode  # Correct running average for watch mode.
+                    recent_scores.append(float(score))
+                    avg = float(np.mean(recent_scores))
 
                     self.msg_queue.put(
                         {
@@ -424,11 +467,12 @@ class TrainingDashboard:
                         }
                     )
 
-                self.agent.epsilon = saved_epsilon
                 done_text = "Watch stopped" if self.stop_event.is_set() else "Watch complete"
                 self.msg_queue.put({"type": "done", "text": done_text})
             except Exception as exc:
                 self.msg_queue.put({"type": "error", "text": str(exc)})
+            finally:
+                self.agent.epsilon = saved_epsilon
 
         self._launch_worker(worker)
 

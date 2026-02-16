@@ -22,9 +22,9 @@ class QNetwork(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_size, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, len(ACTIONS)),
         )
 
@@ -45,7 +45,7 @@ class SnakeDQNAgent:
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
-        self.optimizer = torch.optim.Adam(self.policy_net.parameters(), lr=cfg.lr)
+        self.optimizer = torch.optim.AdamW(self.policy_net.parameters(), lr=cfg.lr, weight_decay=1e-5)
         self.memory: deque[tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(maxlen=cfg.memory_size)
 
         self.epsilon = cfg.epsilon_start
@@ -59,14 +59,14 @@ class SnakeDQNAgent:
         if explore and random.random() < self.epsilon:
             return random.choice(valid_indices)
 
-        state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+        state_t = torch.from_numpy(state).to(self.device).unsqueeze(0)
         with torch.no_grad():
             q_values = self.policy_net(state_t).squeeze(0)
 
-        # Mask illegal reverse-direction move.
-        mask = torch.full((len(ACTIONS),), float("-inf"), device=self.device)
-        mask[valid_indices] = 0.0
-        return int(torch.argmax(q_values + mask).item())
+        # Argmax only over valid actions to avoid extra mask allocations.
+        valid_q = q_values[valid_indices]
+        best_in_valid = int(torch.argmax(valid_q).item())
+        return int(valid_indices[best_in_valid])
 
     def remember(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool) -> None:
         self.memory.append((state, action, reward, next_state, done))
@@ -78,20 +78,22 @@ class SnakeDQNAgent:
         batch = random.sample(self.memory, self.cfg.batch_size)
         states, actions, rewards, next_states, dones = zip(*batch)
 
-        states_t = torch.tensor(np.array(states), dtype=torch.float32, device=self.device)
+        states_t = torch.from_numpy(np.stack(states).astype(np.float32, copy=False)).to(self.device)
         actions_t = torch.tensor(actions, dtype=torch.long, device=self.device)
         rewards_t = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-        next_states_t = torch.tensor(np.array(next_states), dtype=torch.float32, device=self.device)
+        next_states_t = torch.from_numpy(np.stack(next_states).astype(np.float32, copy=False)).to(self.device)
         dones_t = torch.tensor(dones, dtype=torch.float32, device=self.device)
 
         current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
         with torch.no_grad():
-            next_q = self.target_net(next_states_t).max(dim=1)[0]
+            # Double DQN: select with policy net, evaluate with target net.
+            next_actions = self.policy_net(next_states_t).argmax(dim=1, keepdim=True)
+            next_q = self.target_net(next_states_t).gather(1, next_actions).squeeze(1)
 
         target_q = rewards_t + self.cfg.gamma * next_q * (1.0 - dones_t)
 
-        loss = F.mse_loss(current_q, target_q)
+        loss = F.smooth_l1_loss(current_q, target_q)
         self.optimizer.zero_grad()
         loss.backward()
         nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)

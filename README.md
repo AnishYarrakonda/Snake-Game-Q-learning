@@ -28,6 +28,7 @@ python3 train_offline.py
 
 Running without flags opens a simple interactive console setup (press Enter to keep defaults).
 You can also type `default` at the very first prompt to skip all setup instantly.
+During interactive setup, pressing Enter on any individual prompt keeps that parameter's default value.
 
 Useful options:
 
@@ -40,18 +41,23 @@ python3 train_offline.py --load models/snake_dqn_20x20.pt --save models/my_model
 
 This trains the model and saves a `.pt` file (default: `models/snake_dqn_<board>x<board>.pt`).
 
+Plot behavior:
+- top subplot: mean length per 50 episodes + median per 25 episodes with IQR band
+- bottom subplot: histogram of episode lengths (distribution)
+- console status uses rolling `Avg50`
+
 ### 2) Watch training / watch model play (dashboard)
 
 Run:
 
 ```bash
-python training_dashboard.py
+python3 training_dashboard.py
 ```
 
 Or the compatibility launcher:
 
 ```bash
-python qlearning_agent.py
+python3 qlearning_agent.py
 ```
 
 Inside the dashboard:
@@ -66,13 +72,13 @@ Inside the dashboard:
 Run:
 
 ```bash
-python snake_gui.py
+python3 snake_gui.py
 ```
 
 Or the compatibility launcher:
 
 ```bash
-python gui.py
+python3 gui.py
 ```
 
 Controls:

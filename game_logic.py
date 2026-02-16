@@ -47,6 +47,7 @@ class SnakeGame:
         self.pending_direction = "right"                    # queued from input; applied next tick
         self.running = False
         self.alive = True
+        self.won = False
         self.score = 0
 
         self.spawn_snake(self.config.initial_length)
@@ -105,6 +106,7 @@ class SnakeGame:
             new_y %= size
         elif not self._in_bounds(new_x, new_y):
             self.alive = False
+            self.won = False
             return False
 
         new_head = (new_x, new_y)
@@ -115,6 +117,7 @@ class SnakeGame:
         # (because tail moves away in the same tick).
         if new_head in self.snake_set and not (not growing and new_head == tail):
             self.alive = False
+            self.won = False
             return False
 
         self.snake.appendleft(new_head)
@@ -130,6 +133,9 @@ class SnakeGame:
             self.free_tiles.add(old_tail)
 
         self.replenish_apples()
+        if not self.free_tiles:
+            self.won = True
+            self.running = False
         return True
 
     def replenish_apples(self) -> None:
