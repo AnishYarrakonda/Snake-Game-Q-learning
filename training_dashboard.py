@@ -289,7 +289,7 @@ class TrainingDashboard:
 
         max_score = int(max(self.scores))
         bins = np.arange(0.5, max_score + 1.5, 1.0)
-        self.ax_hist.hist(self.scores, bins=bins, color="#44b5a4", alpha=0.85, edgecolor="#17323a")
+        self.ax_hist.hist(self.scores, bins=bins, color="#44b5a4", alpha=0.85, edgecolor="#17323a") #type: ignore
         mean_all = float(np.mean(self.scores))
         median_all = float(np.median(self.scores))
         self.ax_hist.axvline(mean_all, color="#1f77b4", linestyle="--", linewidth=1.6, label=f"Mean: {mean_all:.2f}")

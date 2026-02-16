@@ -39,7 +39,7 @@ except ImportError:
     )
 
 
-def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[float]) -> None:
+def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[float]) -> None: #type: ignore
     ax_trend.clear()
     ax_trend.set_title("Training Trend (Aggregated)")
     ax_trend.set_xlabel("Episode")
@@ -88,7 +88,7 @@ def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[f
     if scores:
         max_score = int(max(scores))
         bins = np.arange(0.5, max_score + 1.5, 1.0)
-        ax_hist.hist(scores, bins=bins, color="#44b5a4", alpha=0.85, edgecolor="#17323a")
+        ax_hist.hist(scores, bins=bins, color="#44b5a4", alpha=0.85, edgecolor="#17323a") #type: ignore
         mean_all = float(np.mean(scores))
         median_all = float(np.median(scores))
         ax_hist.axvline(mean_all, color="#1f77b4", linestyle="--", linewidth=1.6, label=f"Mean: {mean_all:.2f}")
@@ -136,7 +136,7 @@ def train_offline(
             episode_callback(episode, float(score), avg50, float(agent.epsilon))
 
         if show_plot and (episode == 1 or episode % 25 == 0 or episode == cfg.episodes):
-            _update_progress_plots(ax_trend, ax_hist, scores)
+            _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
             fig.canvas.draw_idle() #type: ignore
             fig.canvas.flush_events() #type: ignore
             plt.pause(0.001)
@@ -151,7 +151,7 @@ def train_offline(
     agent.save(out_path)
 
     if show_plot:
-        _update_progress_plots(ax_trend, ax_hist, scores)
+        _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
         plt.ioff()
         plt.show()
 
