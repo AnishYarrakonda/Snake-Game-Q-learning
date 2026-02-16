@@ -41,6 +41,7 @@ class TrainConfig:
     hidden_dim: int = 256
     target_update_every: int = 250
     step_delay: float = 0.0
+    distance_reward_shaping: bool = True
 
 
 class AgentLike(Protocol):
@@ -85,7 +86,12 @@ def nearest_apple_distance(game: SnakeGame) -> int:
     if not game.apples:
         return 0
     hx, hy = game.snake[0]
-    return min(abs(ax - hx) + abs(ay - hy) for ax, ay in game.apples)
+    best = 10**9
+    for ax, ay in game.apples:
+        dist = abs(ax - hx) + abs(ay - hy)
+        if dist < best:
+            best = dist
+    return best
 
 
 def make_game(cfg: TrainConfig) -> SnakeGame:
@@ -122,13 +128,13 @@ def run_episode(
         action = ACTIONS[action_idx]
 
         old_length = len(game.snake)
-        old_distance = nearest_apple_distance(game)
+        old_distance = nearest_apple_distance(game) if cfg.distance_reward_shaping else 0
 
         game.queue_direction(action)
         alive = game.move()
 
         new_length = len(game.snake)
-        new_distance = nearest_apple_distance(game)
+        new_distance = nearest_apple_distance(game) if cfg.distance_reward_shaping else 0
 
         # Reward shaping gives the agent denser feedback than apple/death only.
         reward = 0.01
@@ -136,10 +142,11 @@ def run_episode(
             reward = -1.0
         elif new_length > old_length:
             reward = 1.0
-        elif new_distance < old_distance:
-            reward += 0.03
-        elif new_distance > old_distance:
-            reward -= 0.03
+        elif cfg.distance_reward_shaping:
+            if new_distance < old_distance:
+                reward += 0.03
+            elif new_distance > old_distance:
+                reward -= 0.03
 
         done = not alive
         next_state = encode_state(game, cfg.board_size)

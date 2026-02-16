@@ -11,7 +11,7 @@ From the repo root:
 
 ```bash
 cd reinforcement_learning/snake_game_q_learning
-python -m pip install torch numpy matplotlib
+python3 -m pip install torch numpy matplotlib
 ```
 
 `tkinter` is also required for GUI modes (usually included with standard Python installs).
@@ -23,15 +23,18 @@ python -m pip install torch numpy matplotlib
 Run:
 
 ```bash
-python train_offline.py
+python3 train_offline.py
 ```
+
+Running without flags opens a simple interactive console setup (press Enter to keep defaults).
 
 Useful options:
 
 ```bash
-python train_offline.py --board-size 20 --apples 3 --episodes 3000 --max-steps 1200
-python train_offline.py --no-plot
-python train_offline.py --load models/snake_dqn_20x20.pt --save models/my_model.pt
+python3 train_offline.py --board-size 20 --apples 3 --episodes 3000 --max-steps 1200
+python3 train_offline.py --no-plot
+python3 train_offline.py --no-distance-shaping
+python3 train_offline.py --load models/snake_dqn_20x20.pt --save models/my_model.pt
 ```
 
 This trains the model and saves a `.pt` file (default: `models/snake_dqn_<board>x<board>.pt`).

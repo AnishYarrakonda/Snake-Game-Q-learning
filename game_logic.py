@@ -39,8 +39,6 @@ class SnakeGame:
     def reset(self) -> None:
         """Initialize a fresh board with centered snake and apples."""
         size = self.config.grid_size
-        # 2D board is optional bookkeeping; collision checks use sets/deque for speed.
-        self.grid = [[0 for _ in range(size)] for _ in range(size)]
         self.snake: deque[tuple[int, int]] = deque()        # ordered body, head at index 0
         self.snake_set: set[tuple[int, int]] = set()        # O(1) body collision lookup
         self.apples: set[tuple[int, int]] = set()           # apple positions
@@ -75,7 +73,6 @@ class SnakeGame:
             self.snake.append((x, y))
             self.snake_set.add((x, y))
             self.free_tiles.discard((x, y))
-            self.grid[y][x] = 1
 
     def _next_head(self, direction: str) -> tuple[int, int]:
         """Translate current head by one tile in the given direction."""
@@ -139,7 +136,7 @@ class SnakeGame:
         """Keep spawning apples until configured count is reached or board is full."""
         target = min(self.config.apples, len(self.free_tiles))
         while len(self.apples) < target and self.free_tiles:
-            pos = random.choice(tuple(self.free_tiles))
+            pos = random.sample(self.free_tiles, 1)[0]
             self.apples.add(pos)
             self.free_tiles.discard(pos)
 
