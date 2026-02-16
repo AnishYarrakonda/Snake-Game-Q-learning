@@ -69,6 +69,8 @@ Inside the dashboard:
 - `Train`: trains the agent and shows board + live episode graph
 - `Watch`: runs the model in play mode (`epsilon=0`) so you can watch it play
 - `Anim delay (ms)` slider: controls animation speed in training/watch playback
+- `Apply Changes`: applies most hyperparameter/reward updates live during training
+  (`board`, `apples`, and `episodes` are locked while a run is active)
 - `Load`: load a saved `.pt` model
 - `Save`: save current model
 - `Stop`: stop current run
