@@ -59,6 +59,9 @@ class TrainingDashboard:
         self.msg_queue: queue.Queue[dict] = queue.Queue()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
+        self.cfg_lock = threading.Lock()
+        self.runtime_cfg: TrainConfig | None = None
+        self.active_training_immutable: tuple[int, int, int] | None = None  # board, apples, episodes
 
         self.cfg = TrainConfig()
         self.agent = SnakeDQNAgent(self.cfg)
@@ -98,6 +101,12 @@ class TrainingDashboard:
         self.eps_decay_var = tk.StringVar(value=str(self.cfg.epsilon_decay))
         self.eps_min_var = tk.StringVar(value=str(self.cfg.epsilon_min))
         self.lr_var = tk.StringVar(value=str(self.cfg.lr))
+        self.reward_step_var = tk.StringVar(value=str(self.cfg.reward_step))
+        self.reward_apple_var = tk.StringVar(value=str(self.cfg.reward_apple))
+        self.penalty_death_var = tk.StringVar(value=str(self.cfg.penalty_death))
+        self.reward_win_var = tk.StringVar(value=str(self.cfg.reward_win))
+        self.distance_delta_var = tk.StringVar(value=str(self.cfg.distance_reward_delta))
+        self.stall_penalty_var = tk.StringVar(value=str(self.cfg.stall_penalty))
         self.anim_delay_var = tk.DoubleVar(value=0.0)
 
         self._add_dropdown(controls, "Board", self.board_var, [str(v) for v in BOARD_SIZES])
@@ -107,12 +116,19 @@ class TrainingDashboard:
         self._add_entry(controls, "Epsilon decay", self.eps_decay_var)
         self._add_entry(controls, "Epsilon min", self.eps_min_var)
         self._add_entry(controls, "Learning rate", self.lr_var)
+        self._add_entry(controls, "Step reward", self.reward_step_var)
+        self._add_entry(controls, "Apple reward", self.reward_apple_var)
+        self._add_entry(controls, "Death penalty", self.penalty_death_var)
+        self._add_entry(controls, "Win reward", self.reward_win_var)
+        self._add_entry(controls, "Distance delta", self.distance_delta_var)
+        self._add_entry(controls, "Stall penalty", self.stall_penalty_var)
         self._add_slider(controls, "Anim delay (ms)", self.anim_delay_var, 0, 150, 5)
 
         btn_row = tk.Frame(controls, bg="#0f1720")
         btn_row.pack(fill="x", pady=(8, 0))
 
         tk.Button(btn_row, text="Train", command=self.start_training, width=10).pack(side="left", padx=2)
+        tk.Button(btn_row, text="Apply Changes", command=self.apply_runtime_changes, width=12).pack(side="left", padx=2)
         tk.Button(btn_row, text="Watch", command=self.start_watch, width=10).pack(side="left", padx=2)
         tk.Button(btn_row, text="Stop", command=self.stop_worker, width=10).pack(side="left", padx=2)
         tk.Button(btn_row, text="Load", command=self.load_model, width=10).pack(side="left", padx=2)
@@ -185,6 +201,12 @@ class TrainingDashboard:
         eps_decay = float(self.eps_decay_var.get())
         eps_min = float(self.eps_min_var.get())
         lr = float(self.lr_var.get())
+        reward_step = float(self.reward_step_var.get())
+        reward_apple = float(self.reward_apple_var.get())
+        penalty_death = float(self.penalty_death_var.get())
+        reward_win = float(self.reward_win_var.get())
+        distance_reward_delta = float(self.distance_delta_var.get())
+        stall_penalty = float(self.stall_penalty_var.get())
         anim_delay_ms = float(self.anim_delay_var.get())
 
         if board_size not in BOARD_SIZES:
@@ -195,10 +217,16 @@ class TrainingDashboard:
             raise ValueError("Episodes and max steps must be > 0.")
         if not (0.9 <= eps_decay <= 0.99999):
             raise ValueError("Epsilon decay must be between 0.9 and 0.99999.")
-        if not (0 < eps_min <= 1.0):
-            raise ValueError("Epsilon min must be in (0, 1].")
+        if not (0.0 <= eps_min <= 1.0):
+            raise ValueError("Epsilon min must be in [0, 1].")
         if lr <= 0:
             raise ValueError("Learning rate must be > 0.")
+        if penalty_death > 0:
+            raise ValueError("Death penalty should be <= 0.")
+        if stall_penalty > 0:
+            raise ValueError("Stall penalty should be <= 0.")
+        if distance_reward_delta < 0:
+            raise ValueError("Distance reward delta should be >= 0.")
         if not (0 <= anim_delay_ms <= 1000):
             raise ValueError("Animation delay must be between 0 and 1000 ms.")
 
@@ -210,6 +238,12 @@ class TrainingDashboard:
             epsilon_decay=eps_decay,
             epsilon_min=eps_min,
             lr=lr,
+            reward_step=reward_step,
+            reward_apple=reward_apple,
+            penalty_death=penalty_death,
+            reward_win=reward_win,
+            distance_reward_delta=distance_reward_delta,
+            stall_penalty=stall_penalty,
             step_delay=anim_delay_ms / 1000.0,
         )
 
@@ -224,6 +258,53 @@ class TrainingDashboard:
         self.agent.cfg = cfg
         for group in self.agent.optimizer.param_groups:
             group["lr"] = cfg.lr
+
+    def _set_runtime_cfg(self, cfg: TrainConfig) -> None:
+        with self.cfg_lock:
+            self.runtime_cfg = cfg
+            self.cfg = cfg
+            self.agent.cfg = cfg
+            for group in self.agent.optimizer.param_groups:
+                group["lr"] = cfg.lr
+
+    def _get_runtime_cfg(self) -> TrainConfig:
+        with self.cfg_lock:
+            if self.runtime_cfg is None:
+                return self.cfg
+            return replace(self.runtime_cfg)
+
+    def apply_runtime_changes(self) -> None:
+        try:
+            new_cfg = self._read_cfg_from_ui()
+        except ValueError as exc:
+            messagebox.showerror("Invalid Config", str(exc))
+            return
+
+        running = bool(self.worker and self.worker.is_alive())
+        if running and self.active_training_immutable is not None:
+            base_board, base_apples, base_episodes = self.active_training_immutable
+            immutable_changed = (
+                new_cfg.board_size != base_board
+                or new_cfg.apples != base_apples
+                or new_cfg.episodes != base_episodes
+            )
+            if immutable_changed:
+                messagebox.showwarning(
+                    "Immutable While Training",
+                    "Board, apples, and episodes cannot change during active training.\n"
+                    "Your other parameter changes were still applied.",
+                )
+                new_cfg = replace(new_cfg, board_size=base_board, apples=base_apples, episodes=base_episodes)
+                self.board_var.set(str(base_board))
+                self.apple_var.set(str(base_apples))
+                self.episodes_var.set(str(base_episodes))
+
+        self._sync_agent_to_cfg(new_cfg)
+        self._set_runtime_cfg(new_cfg)
+        self.status_var.set(
+            f"Changes applied | LR: {new_cfg.lr:.5f}, eps_min: {new_cfg.epsilon_min:.3f}, "
+            f"max_steps: {new_cfg.max_steps}, anim: {new_cfg.step_delay:.3f}s"
+        )
 
     def _draw_snapshot(self, snapshot: dict) -> None:
         size = snapshot["size"]
@@ -370,6 +451,8 @@ class TrainingDashboard:
             return
 
         self._sync_agent_to_cfg(cfg)
+        self._set_runtime_cfg(cfg)
+        self.active_training_immutable = (cfg.board_size, cfg.apples, cfg.episodes)
         print(f"\nUsing device: {self.agent.device}\n")
         self.status_var.set(f"Ready | Device: {self.agent.device}")
         self._clear_series()
@@ -393,13 +476,15 @@ class TrainingDashboard:
                         }
                     )
 
-                for episode in range(1, cfg.episodes + 1):
+                total_episodes = cfg.episodes
+                for episode in range(1, total_episodes + 1):
                     if self.stop_event.is_set():
                         break
+                    current_cfg = self._get_runtime_cfg()
 
                     score, _, _ = run_episode(
                         self.agent,
-                        cfg,
+                        current_cfg,
                         train=True,
                         render_step=on_step,
                         stop_flag=self.stop_event,
@@ -414,7 +499,7 @@ class TrainingDashboard:
                         {
                             "type": "episode",
                             "episode": episode,
-                            "total": cfg.episodes,
+                            "total": total_episodes,
                             "score": score,
                             "avg": avg,
                             "epsilon": self.agent.epsilon,
@@ -436,6 +521,7 @@ class TrainingDashboard:
             return
 
         self._sync_agent_to_cfg(cfg)
+        self._set_runtime_cfg(cfg)
         self._clear_series()
 
         def worker() -> None:
@@ -465,6 +551,8 @@ class TrainingDashboard:
                 for episode in range(1, max_watch_episodes + 1):
                     if self.stop_event.is_set():
                         break
+                    current_cfg = self._get_runtime_cfg()
+                    watch_cfg = replace(current_cfg, step_delay=current_cfg.step_delay)
 
                     score, _, _ = run_episode(
                         self.agent,

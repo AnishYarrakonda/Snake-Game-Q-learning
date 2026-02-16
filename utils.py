@@ -48,6 +48,11 @@ class TrainConfig:
     state_encoding: str = "compact11"  # compact11 | board
     stall_limit_factor: int = 100
     stall_penalty: float = -5.0
+    reward_step: float = 0.0
+    reward_apple: float = 10.0
+    penalty_death: float = -10.0
+    reward_win: float = 20.0
+    distance_reward_delta: float = 0.2
 
 
 class AgentLike(Protocol):
@@ -315,22 +320,21 @@ def run_episode(
             stagnation_steps += 1
         stalled = stagnation_steps > cfg.stall_limit_factor * max(1, len(game.snake))
 
-        # Patrick Loeber style reward scale; denser shaping is optional.
-        reward = 0.0
+        reward = cfg.reward_step
         if not alive:
-            reward = -10.0
+            reward = cfg.penalty_death
         elif won:
-            reward = 20.0
+            reward = cfg.reward_win
         elif stalled:
             reward = cfg.stall_penalty
         elif new_length > old_length:
-            reward = 10.0
+            reward = cfg.reward_apple
         elif use_distance_shaping:
             new_distance = nearest_apple_distance(game)
             if new_distance < old_distance:
-                reward += 0.2
+                reward += cfg.distance_reward_delta
             elif new_distance > old_distance:
-                reward -= 0.2
+                reward -= cfg.distance_reward_delta
 
         done = (not alive) or won or stalled
         next_state = encode_state(game, cfg)

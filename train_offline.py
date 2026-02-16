@@ -180,6 +180,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epsilon-decay", type=float, default=defaults.epsilon_decay)
     parser.add_argument("--epsilon-min", type=float, default=defaults.epsilon_min)
     parser.add_argument("--lr", type=float, default=defaults.lr)
+    parser.add_argument("--reward-step", type=float, default=defaults.reward_step)
+    parser.add_argument("--reward-apple", type=float, default=defaults.reward_apple)
+    parser.add_argument("--penalty-death", type=float, default=defaults.penalty_death)
+    parser.add_argument("--reward-win", type=float, default=defaults.reward_win)
+    parser.add_argument("--distance-reward-delta", type=float, default=defaults.distance_reward_delta)
+    parser.add_argument("--stall-penalty", type=float, default=defaults.stall_penalty)
     parser.add_argument(
         "--state-encoding",
         type=str,
@@ -272,6 +278,12 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
     epsilon_decay = _prompt_float("Epsilon decay", default_cfg.epsilon_decay, min_value=0.9, max_value=0.99999)
     epsilon_min = _prompt_float("Epsilon min", default_cfg.epsilon_min, min_value=0.0, max_value=1.0)
     lr = _prompt_float("Learning rate", default_cfg.lr, min_value=1e-8)
+    reward_step = _prompt_float("Step reward", default_cfg.reward_step)
+    reward_apple = _prompt_float("Apple reward", default_cfg.reward_apple)
+    penalty_death = _prompt_float("Death penalty", default_cfg.penalty_death, max_value=0.0)
+    reward_win = _prompt_float("Win reward", default_cfg.reward_win)
+    distance_reward_delta = _prompt_float("Distance reward delta", default_cfg.distance_reward_delta, min_value=0.0)
+    stall_penalty = _prompt_float("Stall penalty", default_cfg.stall_penalty, max_value=0.0)
     use_distance_shaping = _prompt_bool("Use distance-based reward shaping", default_cfg.distance_reward_shaping)
     show_plot = _prompt_bool("Show live matplotlib plot", False)
 
@@ -286,6 +298,12 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
         epsilon_decay=epsilon_decay,
         epsilon_min=epsilon_min,
         lr=lr,
+        reward_step=reward_step,
+        reward_apple=reward_apple,
+        penalty_death=penalty_death,
+        reward_win=reward_win,
+        distance_reward_delta=distance_reward_delta,
+        stall_penalty=stall_penalty,
         distance_reward_shaping=use_distance_shaping,
         state_encoding=default_cfg.state_encoding,
     )
@@ -308,6 +326,12 @@ def run_offline_training_cli() -> None:
             epsilon_decay=args.epsilon_decay,
             epsilon_min=args.epsilon_min,
             lr=args.lr,
+            reward_step=args.reward_step,
+            reward_apple=args.reward_apple,
+            penalty_death=args.penalty_death,
+            reward_win=args.reward_win,
+            distance_reward_delta=args.distance_reward_delta,
+            stall_penalty=args.stall_penalty,
             distance_reward_shaping=not args.no_distance_shaping,
             state_encoding=args.state_encoding,
         )
