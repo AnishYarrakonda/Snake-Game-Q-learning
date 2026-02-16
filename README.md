@@ -71,6 +71,7 @@ Inside the dashboard:
 - `Anim delay (ms)` slider: controls animation speed in training/watch playback
 - `Apply Changes`: applies most hyperparameter/reward updates live during training
   (`board`, `apples`, and `episodes` are locked while a run is active)
+- `Visual Theme`: customize snake/apple/grid/background/border colors using hex or color picker
 - `Load`: load a saved `.pt` model
 - `Save`: save current model
 - `Stop`: stop current run

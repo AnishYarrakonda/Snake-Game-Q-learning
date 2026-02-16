@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import colorchooser, filedialog, messagebox
 
 try:
     from .agent import SnakeDQNAgent
@@ -49,12 +49,18 @@ except ImportError:
 
 class TrainingDashboard:
     """Dashboard to train/watch Snake DQN without blocking Tkinter."""
+    BG_MAIN = "#0b1220"
+    PANEL_BG = "#111a2a"
+    PANEL_ALT = "#182235"
+    TEXT = "#e6eef7"
+    TEXT_MUTED = "#9db0c7"
+    ACCENT = "#4fc3f7"
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Snake DQN Training Dashboard")
-        self.root.geometry("1500x980")
-        self.root.configure(bg="#101418")
+        self.root.geometry("1640x980")
+        self.root.configure(bg=self.BG_MAIN)
 
         self.msg_queue: queue.Queue[dict] = queue.Queue()
         self.stop_event = threading.Event()
@@ -73,26 +79,30 @@ class TrainingDashboard:
         self.root.after(80, self._poll_queue)
 
     def _build_ui(self) -> None:
-        self.root.columnconfigure(0, weight=1)
-        self.root.columnconfigure(1, weight=1)
+        self.root.columnconfigure(0, weight=3)
+        self.root.columnconfigure(1, weight=2)
         self.root.rowconfigure(0, weight=1)
 
-        left = tk.Frame(self.root, bg="#101418")
+        left = tk.Frame(self.root, bg=self.BG_MAIN)
         left.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        left.rowconfigure(2, weight=1)
+        left.columnconfigure(0, weight=1)
 
-        right = tk.Frame(self.root, bg="#101418")
+        right = tk.Frame(self.root, bg=self.BG_MAIN)
         right.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
 
         controls = tk.LabelFrame(
             left,
             text="Training Controls",
-            bg="#0f1720",
-            fg="#e6eef7",
+            bg=self.PANEL_BG,
+            fg=self.TEXT,
             font=("Helvetica", 12, "bold"),
             padx=12,
             pady=10,
+            bd=1,
+            relief="groove",
         )
-        controls.pack(fill="x")
+        controls.grid(row=0, column=0, sticky="ew")
 
         self.board_var = tk.StringVar(value=str(self.cfg.board_size))
         self.apple_var = tk.StringVar(value=str(self.cfg.apples))
@@ -113,58 +123,92 @@ class TrainingDashboard:
         self.stall_penalty_var = tk.StringVar(value=str(self.cfg.stall_penalty))
         self.distance_shaping_var = tk.BooleanVar(value=self.cfg.distance_reward_shaping)
         self.anim_delay_var = tk.DoubleVar(value=0.0)
+        self.snake_head_color_var = tk.StringVar(value="#45d483")
+        self.snake_body_color_var = tk.StringVar(value="#1fb86b")
+        self.apple_color_var = tk.StringVar(value="#ff5c74")
+        self.grid_color_var = tk.StringVar(value="#2a3340")
+        self.board_bg_color_var = tk.StringVar(value="#1c2229")
+        self.border_color_var = tk.StringVar(value="#7f8b99")
 
-        self._add_dropdown(controls, "Board", self.board_var, [str(v) for v in BOARD_SIZES])
-        self._add_dropdown(controls, "Apples", self.apple_var, [str(v) for v in APPLE_CHOICES])
-        self._add_entry(controls, "Episodes", self.episodes_var)
-        self._add_entry(controls, "Max steps", self.max_steps_var)
-        self._add_entry(controls, "Epsilon decay", self.eps_decay_var)
-        self._add_entry(controls, "Epsilon min", self.eps_min_var)
-        self._add_entry(controls, "Gamma", self.gamma_var)
-        self._add_entry(controls, "Learning rate", self.lr_var)
-        self._add_entry(controls, "Batch size", self.batch_size_var)
-        self._add_entry(controls, "Target update", self.target_update_var)
-        self._add_entry(controls, "Step reward", self.reward_step_var)
-        self._add_entry(controls, "Apple reward", self.reward_apple_var)
-        self._add_entry(controls, "Death penalty", self.penalty_death_var)
-        self._add_entry(controls, "Win reward", self.reward_win_var)
-        self._add_entry(controls, "Distance delta", self.distance_delta_var)
-        self._add_entry(controls, "Stall factor", self.stall_factor_var)
-        self._add_entry(controls, "Stall penalty", self.stall_penalty_var)
-        tk.Checkbutton(
+        columns = tk.Frame(controls, bg=self.PANEL_BG)
+        columns.pack(fill="x")
+        left_col = tk.Frame(columns, bg=self.PANEL_BG)
+        right_col = tk.Frame(columns, bg=self.PANEL_BG)
+        left_col.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        right_col.pack(side="left", fill="both", expand=True, padx=(8, 0))
+
+        self._add_dropdown(left_col, "Board", self.board_var, [str(v) for v in BOARD_SIZES])
+        self._add_dropdown(left_col, "Apples", self.apple_var, [str(v) for v in APPLE_CHOICES])
+        self._add_entry(left_col, "Episodes", self.episodes_var)
+        self._add_entry(left_col, "Max steps", self.max_steps_var)
+        self._add_entry(left_col, "Epsilon decay", self.eps_decay_var)
+        self._add_entry(left_col, "Epsilon min", self.eps_min_var)
+        self._add_entry(left_col, "Gamma", self.gamma_var)
+        self._add_entry(left_col, "Learning rate", self.lr_var)
+        self._add_entry(left_col, "Batch size", self.batch_size_var)
+        self._add_entry(left_col, "Target update", self.target_update_var)
+
+        self._add_entry(right_col, "Step reward", self.reward_step_var)
+        self._add_entry(right_col, "Apple reward", self.reward_apple_var)
+        self._add_entry(right_col, "Death penalty", self.penalty_death_var)
+        self._add_entry(right_col, "Win reward", self.reward_win_var)
+        self._add_entry(right_col, "Distance delta", self.distance_delta_var)
+        self._add_entry(right_col, "Stall factor", self.stall_factor_var)
+        self._add_entry(right_col, "Stall penalty", self.stall_penalty_var)
+        self._add_slider(right_col, "Anim delay (ms)", self.anim_delay_var, 0, 150, 5)
+
+        visuals = tk.LabelFrame(
             controls,
+            text="Visual Theme",
+            bg=self.PANEL_ALT,
+            fg=self.TEXT,
+            font=("Helvetica", 10, "bold"),
+            padx=10,
+            pady=8,
+            bd=1,
+            relief="groove",
+        )
+        visuals.pack(fill="x", pady=(8, 0))
+        self._add_color_row(visuals, "Snake head", self.snake_head_color_var)
+        self._add_color_row(visuals, "Snake body", self.snake_body_color_var)
+        self._add_color_row(visuals, "Apple", self.apple_color_var)
+        self._add_color_row(visuals, "Grid", self.grid_color_var)
+        self._add_color_row(visuals, "Board bg", self.board_bg_color_var)
+        self._add_color_row(visuals, "Border", self.border_color_var)
+
+        tk.Checkbutton(
+            left_col,
             text="Use distance reward shaping",
             variable=self.distance_shaping_var,
-            bg="#0f1720",
-            fg="#dbe7f3",
-            activebackground="#0f1720",
-            activeforeground="#dbe7f3",
-            selectcolor="#0f1720",
-        ).pack(anchor="w", pady=(4, 0))
-        self._add_slider(controls, "Anim delay (ms)", self.anim_delay_var, 0, 150, 5)
+            bg=self.PANEL_BG,
+            fg=self.TEXT_MUTED,
+            activebackground=self.PANEL_BG,
+            activeforeground=self.TEXT,
+            selectcolor=self.PANEL_BG,
+        ).pack(anchor="w", pady=(8, 0))
 
-        btn_row = tk.Frame(controls, bg="#0f1720")
+        btn_row = tk.Frame(controls, bg=self.PANEL_BG)
         btn_row.pack(fill="x", pady=(8, 0))
 
-        tk.Button(btn_row, text="Train", command=self.start_training, width=10).pack(side="left", padx=2)
-        tk.Button(btn_row, text="Apply Changes", command=self.apply_runtime_changes, width=12).pack(side="left", padx=2)
-        tk.Button(btn_row, text="Watch", command=self.start_watch, width=10).pack(side="left", padx=2)
-        tk.Button(btn_row, text="Stop", command=self.stop_worker, width=10).pack(side="left", padx=2)
-        tk.Button(btn_row, text="Load", command=self.load_model, width=10).pack(side="left", padx=2)
-        tk.Button(btn_row, text="Save", command=self.save_model, width=10).pack(side="left", padx=2)
+        self._make_btn(btn_row, "Train", self.start_training, w=10).pack(side="left", padx=2)
+        self._make_btn(btn_row, "Apply Changes", self.apply_runtime_changes, w=12).pack(side="left", padx=2)
+        self._make_btn(btn_row, "Watch", self.start_watch, w=10).pack(side="left", padx=2)
+        self._make_btn(btn_row, "Stop", self.stop_worker, w=10).pack(side="left", padx=2)
+        self._make_btn(btn_row, "Load", self.load_model, w=10).pack(side="left", padx=2)
+        self._make_btn(btn_row, "Save", self.save_model, w=10).pack(side="left", padx=2)
 
         self.status_var = tk.StringVar(value="Ready")
         tk.Label(
             left,
             textvariable=self.status_var,
-            fg="#d9e3ef",
-            bg="#101418",
+            fg=self.TEXT,
+            bg=self.BG_MAIN,
             font=("Helvetica", 12, "bold"),
             anchor="w",
-        ).pack(fill="x", pady=(10, 8))
+        ).grid(row=1, column=0, sticky="ew", pady=(10, 8))
 
-        self.canvas = tk.Canvas(left, bg="#1c2229", width=700, height=700, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
+        self.canvas = tk.Canvas(left, bg=self.board_bg_color_var.get(), width=940, height=760, highlightthickness=0)
+        self.canvas.grid(row=2, column=0, sticky="nsew")
 
         fig = plt.Figure(figsize=(7, 7), dpi=100) #type: ignore
         self.ax_trend = fig.add_subplot(211)
@@ -173,18 +217,41 @@ class TrainingDashboard:
 
         self.plot_canvas = FigureCanvasTkAgg(fig, master=right)
         self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._apply_visual_settings()
 
     def _add_entry(self, parent: tk.Widget, label: str, var: tk.StringVar) -> None:
-        row = tk.Frame(parent, bg="#0f1720")
+        row = tk.Frame(parent, bg=self.PANEL_BG)
         row.pack(fill="x", pady=2)
-        tk.Label(row, text=label, bg="#0f1720", fg="#dbe7f3", width=12, anchor="w").pack(side="left")
-        tk.Entry(row, textvariable=var, width=12, justify="center").pack(side="left")
+        tk.Label(row, text=label, bg=self.PANEL_BG, fg=self.TEXT_MUTED, width=12, anchor="w").pack(side="left")
+        tk.Entry(
+            row,
+            textvariable=var,
+            width=12,
+            justify="center",
+            relief="flat",
+            bd=0,
+            bg="#e8eef5",
+            fg="#112033",
+            insertbackground="#112033",
+        ).pack(side="left", fill="x", expand=True)
 
     def _add_dropdown(self, parent: tk.Widget, label: str, var: tk.StringVar, options: list[str]) -> None:
-        row = tk.Frame(parent, bg="#0f1720")
+        row = tk.Frame(parent, bg=self.PANEL_BG)
         row.pack(fill="x", pady=2)
-        tk.Label(row, text=label, bg="#0f1720", fg="#dbe7f3", width=12, anchor="w").pack(side="left")
-        tk.OptionMenu(row, var, *options).pack(side="left")
+        tk.Label(row, text=label, bg=self.PANEL_BG, fg=self.TEXT_MUTED, width=12, anchor="w").pack(side="left")
+        dropdown = tk.OptionMenu(row, var, *options)
+        dropdown.config(
+            bg="#e8eef5",
+            fg="#112033",
+            activebackground="#d7e4f1",
+            activeforeground="#112033",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            width=9,
+        )
+        dropdown["menu"].config(bg="#e8eef5", fg="#112033", activebackground="#d7e4f1", activeforeground="#112033")
+        dropdown.pack(side="left", fill="x", expand=True)
 
     def _add_slider(
         self,
@@ -195,9 +262,9 @@ class TrainingDashboard:
         max_value: float,
         resolution: float,
     ) -> None:
-        row = tk.Frame(parent, bg="#0f1720")
+        row = tk.Frame(parent, bg=self.PANEL_BG)
         row.pack(fill="x", pady=2)
-        tk.Label(row, text=label, bg="#0f1720", fg="#dbe7f3", width=12, anchor="w").pack(side="left")
+        tk.Label(row, text=label, bg=self.PANEL_BG, fg=self.TEXT_MUTED, width=12, anchor="w").pack(side="left")
         tk.Scale(
             row,
             variable=var,
@@ -206,11 +273,79 @@ class TrainingDashboard:
             resolution=resolution,
             orient="horizontal",
             showvalue=True,
-            length=220,
-            bg="#0f1720",
-            fg="#dbe7f3",
+            length=180,
+            bg=self.PANEL_BG,
+            fg=self.TEXT,
             highlightthickness=0,
+            troughcolor="#263349",
+            activebackground=self.ACCENT,
         ).pack(side="left", fill="x", expand=True)
+
+    def _add_color_row(self, parent: tk.Widget, label: str, var: tk.StringVar) -> None:
+        row = tk.Frame(parent, bg=self.PANEL_ALT)
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text=label, bg=self.PANEL_ALT, fg=self.TEXT_MUTED, width=12, anchor="w").pack(side="left")
+        tk.Entry(
+            row,
+            textvariable=var,
+            width=10,
+            justify="center",
+            relief="flat",
+            bd=0,
+            bg="#e8eef5",
+            fg="#112033",
+            insertbackground="#112033",
+        ).pack(side="left", padx=(0, 4))
+        tk.Button(
+            row,
+            text="Pick",
+            command=lambda v=var: self._pick_color(v),
+            width=6,
+            relief="flat",
+            bd=0,
+            bg=self.ACCENT,
+            fg="#0b1220",
+            activebackground="#7ad7ff",
+            activeforeground="#0b1220",
+        ).pack(side="left")
+
+    def _pick_color(self, var: tk.StringVar) -> None:
+        color = colorchooser.askcolor(color=var.get(), title="Choose color")[1]
+        if color:
+            var.set(color)
+            self._apply_visual_settings()
+
+    def _make_btn(self, parent: tk.Widget, text: str, command, w: int = 10) -> tk.Button:
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            width=w,
+            relief="flat",
+            bd=0,
+            bg=self.ACCENT,
+            fg="#0b1220",
+            activebackground="#7ad7ff",
+            activeforeground="#0b1220",
+            font=("Helvetica", 10, "bold"),
+            cursor="hand2",
+        )
+
+    def _validate_hex_color(self, value: str, name: str) -> str:
+        if len(value) == 7 and value.startswith("#"):
+            hex_part = value[1:]
+            if all(ch in "0123456789abcdefABCDEF" for ch in hex_part):
+                return value
+        raise ValueError(f"{name} must be a hex color like #45d483.")
+
+    def _apply_visual_settings(self) -> None:
+        self.snake_head_color = self._validate_hex_color(self.snake_head_color_var.get().strip(), "Snake head color")
+        self.snake_body_color = self._validate_hex_color(self.snake_body_color_var.get().strip(), "Snake body color")
+        self.apple_color = self._validate_hex_color(self.apple_color_var.get().strip(), "Apple color")
+        self.grid_color = self._validate_hex_color(self.grid_color_var.get().strip(), "Grid color")
+        self.board_bg_color = self._validate_hex_color(self.board_bg_color_var.get().strip(), "Board background color")
+        self.border_color = self._validate_hex_color(self.border_color_var.get().strip(), "Border color")
+        self.canvas.configure(bg=self.board_bg_color)
 
     def _read_cfg_from_ui(self) -> TrainConfig:
         board_size = int(self.board_var.get())
@@ -313,6 +448,7 @@ class TrainingDashboard:
     def apply_runtime_changes(self) -> None:
         try:
             new_cfg = self._read_cfg_from_ui()
+            self._apply_visual_settings()
         except ValueError as exc:
             messagebox.showerror("Invalid Config", str(exc))
             return
@@ -361,10 +497,10 @@ class TrainingDashboard:
 
         for i in range(size + 1):
             pos = i * cell
-            self.canvas.create_line(x_off, y_off + pos, x_off + board_w, y_off + pos, fill="#2a3340")
-            self.canvas.create_line(x_off + pos, y_off, x_off + pos, y_off + board_h, fill="#2a3340")
+            self.canvas.create_line(x_off, y_off + pos, x_off + board_w, y_off + pos, fill=self.grid_color)
+            self.canvas.create_line(x_off + pos, y_off, x_off + pos, y_off + board_h, fill=self.grid_color)
 
-        self.canvas.create_rectangle(x_off, y_off, x_off + board_w, y_off + board_h, outline="#7f8b99", width=2)
+        self.canvas.create_rectangle(x_off, y_off, x_off + board_w, y_off + board_h, outline=self.border_color, width=2)
 
         for x, y in apples:
             self.canvas.create_oval(
@@ -372,12 +508,12 @@ class TrainingDashboard:
                 y_off + y * cell + 3,
                 x_off + (x + 1) * cell - 3,
                 y_off + (y + 1) * cell - 3,
-                fill="#ff5c74",
+                fill=self.apple_color,
                 outline="",
             )
 
         for idx, (x, y) in enumerate(snake):
-            color = "#45d483" if idx == 0 else "#1fb86b"
+            color = self.snake_head_color if idx == 0 else self.snake_body_color
             self.canvas.create_rectangle(
                 x_off + x * cell + 2,
                 y_off + y * cell + 2,
