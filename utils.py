@@ -138,6 +138,26 @@ def chunked_episode_stats(
     )
 
 
+def chunked_median(values: list[float], chunk_size: int) -> tuple[np.ndarray, np.ndarray]:
+    """Compute median value per fixed-size chunk."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be > 0")
+
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.size == 0:
+        empty = np.array([], dtype=np.float32)
+        return empty, empty
+
+    x_end: list[float] = []
+    medians: list[float] = []
+    for start in range(0, arr.size, chunk_size):
+        chunk = arr[start : start + chunk_size]
+        x_end.append(float(start + chunk.size))
+        medians.append(float(np.median(chunk)))
+
+    return np.asarray(x_end, dtype=np.float32), np.asarray(medians, dtype=np.float32)
+
+
 def make_game(cfg: TrainConfig) -> SnakeGame:
     game_cfg = SnakeConfig(
         grid_size=cfg.board_size,
@@ -170,25 +190,25 @@ def run_episode(
     total_reward = 0.0
     steps_taken = 0
     board_capacity = cfg.board_size * cfg.board_size
+    use_distance_shaping = cfg.distance_reward_shaping
+    state = encode_state(game, cfg.board_size)
 
     for step in range(cfg.max_steps):
         if stop_flag and stop_flag.is_set():
             break
 
-        state = encode_state(game, cfg.board_size)
         valid_actions = agent.valid_action_indices(game.direction)
         action_idx = agent.select_action(state, valid_actions, explore=train)
         action = ACTIONS[action_idx]
 
         old_length = len(game.snake)
-        old_distance = nearest_apple_distance(game) if cfg.distance_reward_shaping else 0
+        old_distance = nearest_apple_distance(game) if use_distance_shaping else 0
 
         game.queue_direction(action)
         alive = game.move()
 
         new_length = len(game.snake)
         won = bool(getattr(game, "won", False)) or (new_length >= board_capacity)
-        new_distance = nearest_apple_distance(game) if cfg.distance_reward_shaping else 0
 
         # Reward shaping gives the agent denser feedback than apple/death only.
         reward = 0.01
@@ -198,7 +218,8 @@ def run_episode(
             reward = 2.0
         elif new_length > old_length:
             reward = 1.0
-        elif cfg.distance_reward_shaping:
+        elif use_distance_shaping:
+            new_distance = nearest_apple_distance(game)
             if new_distance < old_distance:
                 reward += 0.03
             elif new_distance > old_distance:
@@ -220,6 +241,7 @@ def run_episode(
             time.sleep(cfg.step_delay)
 
         steps_taken = step + 1
+        state = next_state
         if done:
             break
 

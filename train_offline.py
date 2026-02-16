@@ -21,7 +21,7 @@ try:
         APPLE_CHOICES,
         BOARD_SIZES,
         TrainConfig,
-        chunked_episode_stats,
+        chunked_median,
         default_model_path,
         make_game,
         run_episode,
@@ -32,7 +32,7 @@ except ImportError:
         APPLE_CHOICES,
         BOARD_SIZES,
         TrainConfig,
-        chunked_episode_stats,
+        chunked_median,
         default_model_path,
         make_game,
         run_episode,
@@ -41,39 +41,21 @@ except ImportError:
 
 def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[float]) -> None: #type: ignore
     ax_trend.clear()
-    ax_trend.set_title("Training Trend (Aggregated)")
+    ax_trend.set_title("Training Trend (Median per 25 Episodes)")
     ax_trend.set_xlabel("Episode")
     ax_trend.set_ylabel("Length")
     ax_trend.grid(alpha=0.25)
 
-    x50, mean50, _, _, _ = chunked_episode_stats(scores, chunk_size=50)
-    x25, _, median25, q1_25, q3_25 = chunked_episode_stats(scores, chunk_size=25)
-
-    if x50.size > 0:
-        ax_trend.plot(
-            x50,
-            mean50,
-            color="#1f77b4",
-            linewidth=2.2,
-            marker="o",
-            markersize=3,
-            label="Mean length (per 50 episodes)",
-        )
+    x25, median25 = chunked_median(scores, chunk_size=25)
     if x25.size > 0:
         ax_trend.plot(
             x25,
             median25,
-            color="#ff7f0e",
-            linewidth=2.0,
+            color="#1f77b4",
+            linewidth=2.2,
+            marker="o",
+            markersize=3,
             label="Median length (per 25 episodes)",
-        )
-        ax_trend.fill_between(
-            x25,
-            q1_25,
-            q3_25,
-            color="#ff7f0e",
-            alpha=0.22,
-            label="IQR (25th-75th percentile)",
         )
     handles, labels = ax_trend.get_legend_handles_labels()
     if handles:
@@ -112,7 +94,7 @@ def train_offline(
         agent.load(load_path)
 
     scores: list[float] = []
-    avg50_scores: list[float] = []
+    med25_scores: list[float] = []
 
     if show_plot:
         plt.ion()
@@ -127,13 +109,13 @@ def train_offline(
 
         score, _, _ = run_episode(agent, cfg, train=True, stop_flag=stop_flag, game=episode_game)
         scores.append(float(score))
-        avg50 = float(np.mean(scores[-50:]))
-        avg50_scores.append(avg50)
+        med25 = float(np.median(scores[-25:]))
+        med25_scores.append(med25)
 
         agent.decay_epsilon()
 
         if episode_callback:
-            episode_callback(episode, float(score), avg50, float(agent.epsilon))
+            episode_callback(episode, float(score), med25, float(agent.epsilon))
 
         if show_plot and (episode == 1 or episode % 25 == 0 or episode == cfg.episodes):
             _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
@@ -144,7 +126,7 @@ def train_offline(
         if episode % 50 == 0:
             print(
                 f"Episode {episode}/{cfg.episodes} | "
-                f"Length: {score:.0f} | Avg50: {avg50:.2f} | Epsilon: {agent.epsilon:.4f}"
+                f"Length: {score:.0f} | Median25: {med25:.2f} | Epsilon: {agent.epsilon:.4f}"
             )
 
     out_path = save_path or default_model_path(cfg.board_size)
@@ -155,7 +137,7 @@ def train_offline(
         plt.ioff()
         plt.show()
 
-    return agent, scores, avg50_scores
+    return agent, scores, med25_scores
 
 
 def parse_args() -> argparse.Namespace:
@@ -243,7 +225,8 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
 
     first = input("Quick start: press Enter to configure, or type 'default' to run with all defaults: ").strip().lower()
     if first == "default":
-        return default_cfg, None, None, True
+        # Default quick-start prefers speed: no live plotting.
+        return default_cfg, None, None, False
 
     board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
@@ -253,7 +236,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, str | None, bool]:
     epsilon_min = _prompt_float("Epsilon min", default_cfg.epsilon_min, min_value=0.0, max_value=1.0)
     lr = _prompt_float("Learning rate", default_cfg.lr, min_value=1e-8)
     use_distance_shaping = _prompt_bool("Use distance-based reward shaping", default_cfg.distance_reward_shaping)
-    show_plot = _prompt_bool("Show live matplotlib plot", True)
+    show_plot = _prompt_bool("Show live matplotlib plot", False)
 
     load_raw = input("Model to load (.pt), blank for none: ").strip()
     save_raw = input("Model save path (.pt), blank for default: ").strip()

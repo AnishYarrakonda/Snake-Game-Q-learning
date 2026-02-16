@@ -14,6 +14,11 @@ try:
 except ImportError:
     from utils import ACTIONS, REVERSE_DIRECTION, TrainConfig
 
+VALID_ACTIONS_BY_DIRECTION = {
+    direction: [idx for idx, action in enumerate(ACTIONS) if action != REVERSE_DIRECTION[direction]]
+    for direction in ACTIONS
+}
+
 
 class QNetwork(nn.Module):
     """Feed-forward network where input is the entire flattened board."""
@@ -38,7 +43,14 @@ class SnakeDQNAgent:
     def __init__(self, cfg: TrainConfig, device: torch.device | None = None) -> None:
         self.cfg = cfg
         self.input_size = cfg.board_size * cfg.board_size
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device is not None:
+            self.device = device
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+        else:
+            self.device = torch.device("cpu")
 
         self.policy_net = QNetwork(self.input_size, hidden_dim=cfg.hidden_dim).to(self.device)
         self.target_net = QNetwork(self.input_size, hidden_dim=cfg.hidden_dim).to(self.device)
@@ -52,15 +64,14 @@ class SnakeDQNAgent:
         self.learn_steps = 0
 
     def valid_action_indices(self, current_direction: str) -> list[int]:
-        blocked = REVERSE_DIRECTION[current_direction]
-        return [idx for idx, action in enumerate(ACTIONS) if action != blocked]
+        return VALID_ACTIONS_BY_DIRECTION[current_direction]
 
     def select_action(self, state: np.ndarray, valid_indices: list[int], explore: bool = True) -> int:
         if explore and random.random() < self.epsilon:
             return random.choice(valid_indices)
 
         state_t = torch.from_numpy(state).to(self.device).unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             q_values = self.policy_net(state_t).squeeze(0)
 
         # Argmax only over valid actions to avoid extra mask allocations.
@@ -79,10 +90,10 @@ class SnakeDQNAgent:
         states, actions, rewards, next_states, dones = zip(*batch)
 
         states_t = torch.from_numpy(np.stack(states).astype(np.float32, copy=False)).to(self.device)
-        actions_t = torch.tensor(actions, dtype=torch.long, device=self.device)
-        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+        actions_t = torch.from_numpy(np.fromiter(actions, dtype=np.int64, count=self.cfg.batch_size)).to(self.device)
+        rewards_t = torch.from_numpy(np.fromiter(rewards, dtype=np.float32, count=self.cfg.batch_size)).to(self.device)
         next_states_t = torch.from_numpy(np.stack(next_states).astype(np.float32, copy=False)).to(self.device)
-        dones_t = torch.tensor(dones, dtype=torch.float32, device=self.device)
+        dones_t = torch.from_numpy(np.fromiter(dones, dtype=np.float32, count=self.cfg.batch_size)).to(self.device)
 
         current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
@@ -94,7 +105,7 @@ class SnakeDQNAgent:
         target_q = rewards_t + self.cfg.gamma * next_q * (1.0 - dones_t)
 
         loss = F.smooth_l1_loss(current_q, target_q)
-        self.optimizer.zero_grad()
+        self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=5.0)
         self.optimizer.step()

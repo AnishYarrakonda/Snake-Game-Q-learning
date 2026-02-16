@@ -27,7 +27,7 @@ try:
         BOARD_SIZES,
         MODELS_DIR,
         TrainConfig,
-        chunked_episode_stats,
+        chunked_median,
         default_model_path,
         make_game,
         run_episode,
@@ -40,7 +40,7 @@ except ImportError:
         BOARD_SIZES,
         MODELS_DIR,
         TrainConfig,
-        chunked_episode_stats,
+        chunked_median,
         default_model_path,
         make_game,
         run_episode,
@@ -239,7 +239,7 @@ class TrainingDashboard:
 
     def _update_plot(self) -> None:
         self.ax_trend.clear()
-        self.ax_trend.set_title("Training Trend (Aggregated)")
+        self.ax_trend.set_title("Training Trend (Median per 25 Episodes)")
         self.ax_trend.set_xlabel("Episode")
         self.ax_trend.set_ylabel("Length")
         self.ax_trend.grid(alpha=0.25)
@@ -254,34 +254,16 @@ class TrainingDashboard:
             self.plot_canvas.draw_idle()
             return
 
-        x50, mean50, _, _, _ = chunked_episode_stats(self.scores, chunk_size=50)
-        x25, _, median25, q1_25, q3_25 = chunked_episode_stats(self.scores, chunk_size=25)
-
-        if x50.size > 0:
-            self.ax_trend.plot(
-                x50,
-                mean50,
-                color="#1f77b4",
-                linewidth=2.2,
-                marker="o",
-                markersize=3,
-                label="Mean length (per 50 episodes)",
-            )
+        x25, median25 = chunked_median(self.scores, chunk_size=25)
         if x25.size > 0:
             self.ax_trend.plot(
                 x25,
                 median25,
-                color="#ff7f0e",
-                linewidth=2.0,
+                color="#1f77b4",
+                linewidth=2.2,
+                marker="o",
+                markersize=3,
                 label="Median length (per 25 episodes)",
-            )
-            self.ax_trend.fill_between(
-                x25,
-                q1_25,
-                q3_25,
-                color="#ff7f0e",
-                alpha=0.22,
-                label="IQR (25th-75th percentile)",
             )
         handles, labels = self.ax_trend.get_legend_handles_labels()
         if handles:
@@ -319,7 +301,7 @@ class TrainingDashboard:
                     self.scores.append(score)
                     self._update_plot()
                     self.status_var.set(
-                        f"Episode {episode}/{total} | Length: {score:.0f} | Avg50: {avg:.2f} | Epsilon: {epsilon:.4f}"
+                        f"Episode {episode}/{total} | Length: {score:.0f} | Median25: {avg:.2f} | Epsilon: {epsilon:.4f}"
                     )
 
                 elif mtype == "done":
@@ -360,7 +342,7 @@ class TrainingDashboard:
 
         def worker() -> None:
             try:
-                recent_scores: deque[float] = deque(maxlen=50)
+                recent_scores: deque[float] = deque(maxlen=25)
                 episode_game = make_game(cfg)
 
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
@@ -392,7 +374,7 @@ class TrainingDashboard:
                     self.agent.decay_epsilon()
 
                     recent_scores.append(float(score))
-                    avg = float(np.mean(recent_scores))
+                    avg = float(np.median(recent_scores))
 
                     self.msg_queue.put(
                         {
@@ -428,7 +410,7 @@ class TrainingDashboard:
                 watch_cfg = replace(cfg, step_delay=0.05)
                 self.agent.epsilon = 0.0
 
-                recent_scores: deque[float] = deque(maxlen=50)
+                recent_scores: deque[float] = deque(maxlen=25)
                 max_watch_episodes = 100000
                 episode_game = make_game(watch_cfg)
 
@@ -460,7 +442,7 @@ class TrainingDashboard:
                     )
 
                     recent_scores.append(float(score))
-                    avg = float(np.mean(recent_scores))
+                    avg = float(np.median(recent_scores))
 
                     self.msg_queue.put(
                         {

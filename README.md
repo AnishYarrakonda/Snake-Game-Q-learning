@@ -29,6 +29,7 @@ python3 train_offline.py
 Running without flags opens a simple interactive console setup (press Enter to keep defaults).
 You can also type `default` at the very first prompt to skip all setup instantly.
 During interactive setup, pressing Enter on any individual prompt keeps that parameter's default value.
+Quick-start `default` runs with plotting disabled for faster training.
 
 Useful options:
 
@@ -42,9 +43,9 @@ python3 train_offline.py --load models/snake_dqn_20x20.pt --save models/my_model
 This trains the model and saves a `.pt` file (default: `models/snake_dqn_<board>x<board>.pt`).
 
 Plot behavior:
-- top subplot: mean length per 50 episodes + median per 25 episodes with IQR band
+- top subplot: median length per 25 episodes (simple line)
 - bottom subplot: histogram of episode lengths (distribution)
-- console status uses rolling `Avg50`
+- console status uses rolling `Median25`
 - episode ends as a win when the board is fully filled by the snake
 
 ### 2) Watch training / watch model play (dashboard)
