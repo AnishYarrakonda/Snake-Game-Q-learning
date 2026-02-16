@@ -17,10 +17,26 @@ import numpy as np
 
 try:
     from .agent import SnakeDQNAgent
-    from .utils import APPLE_CHOICES, BOARD_SIZES, TrainConfig, chunked_episode_stats, default_model_path, run_episode
+    from .utils import (
+        APPLE_CHOICES,
+        BOARD_SIZES,
+        TrainConfig,
+        chunked_episode_stats,
+        default_model_path,
+        make_game,
+        run_episode,
+    )
 except ImportError:
     from agent import SnakeDQNAgent
-    from utils import APPLE_CHOICES, BOARD_SIZES, TrainConfig, chunked_episode_stats, default_model_path, run_episode
+    from utils import (
+        APPLE_CHOICES,
+        BOARD_SIZES,
+        TrainConfig,
+        chunked_episode_stats,
+        default_model_path,
+        make_game,
+        run_episode,
+    )
 
 
 def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[float]) -> None:
@@ -103,11 +119,13 @@ def train_offline(
         fig, (ax_trend, ax_hist) = plt.subplots(2, 1, figsize=(10, 8))
         fig.subplots_adjust(hspace=0.35)
 
+    episode_game = make_game(cfg)
+
     for episode in range(1, cfg.episodes + 1):
         if stop_flag and stop_flag.is_set():
             break
 
-        score, _, _ = run_episode(agent, cfg, train=True, stop_flag=stop_flag)
+        score, _, _ = run_episode(agent, cfg, train=True, stop_flag=stop_flag, game=episode_game)
         scores.append(float(score))
         avg50 = float(np.mean(scores[-50:]))
         avg50_scores.append(avg50)

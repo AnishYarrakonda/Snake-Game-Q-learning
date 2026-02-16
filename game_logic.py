@@ -34,15 +34,24 @@ class SnakeGame:
     """Pure game state + rules (no Tkinter/UI code)."""
     def __init__(self, config: SnakeConfig) -> None:
         self.config = config
+        self._cached_size = -1
+        self._all_tiles: list[tuple[int, int]] = []
         self.reset()
 
     def reset(self) -> None:
         """Initialize a fresh board with centered snake and apples."""
         size = self.config.grid_size
+        if size != self._cached_size:
+            self._all_tiles = [(x, y) for x in range(size) for y in range(size)]
+            self._cached_size = size
+
         self.snake: deque[tuple[int, int]] = deque()        # ordered body, head at index 0
         self.snake_set: set[tuple[int, int]] = set()        # O(1) body collision lookup
         self.apples: set[tuple[int, int]] = set()           # apple positions
-        self.free_tiles = {(x, y) for x in range(size) for y in range(size)}
+        self.free_tiles: list[tuple[int, int]] = list(self._all_tiles)
+        self.free_tile_index: dict[tuple[int, int], int] = {
+            pos: idx for idx, pos in enumerate(self.free_tiles)
+        }
         self.direction = "right"
         self.pending_direction = "right"                    # queued from input; applied next tick
         self.running = False
@@ -73,7 +82,25 @@ class SnakeGame:
         for x, y in positions:
             self.snake.append((x, y))
             self.snake_set.add((x, y))
-            self.free_tiles.discard((x, y))
+            self._remove_free_tile((x, y))
+
+    def _remove_free_tile(self, pos: tuple[int, int]) -> None:
+        """O(1) removal from free tile pool using swap-remove."""
+        idx = self.free_tile_index.pop(pos, None)
+        if idx is None:
+            return
+
+        last_pos = self.free_tiles.pop()
+        if idx < len(self.free_tiles):
+            self.free_tiles[idx] = last_pos
+            self.free_tile_index[last_pos] = idx
+
+    def _add_free_tile(self, pos: tuple[int, int]) -> None:
+        """O(1) insertion into free tile pool if tile is currently absent."""
+        if pos in self.free_tile_index:
+            return
+        self.free_tile_index[pos] = len(self.free_tiles)
+        self.free_tiles.append(pos)
 
     def _next_head(self, direction: str) -> tuple[int, int]:
         """Translate current head by one tile in the given direction."""
@@ -122,7 +149,7 @@ class SnakeGame:
 
         self.snake.appendleft(new_head)
         self.snake_set.add(new_head)
-        self.free_tiles.discard(new_head)
+        self._remove_free_tile(new_head)
 
         if growing:
             self.apples.discard(new_head)
@@ -130,7 +157,7 @@ class SnakeGame:
         else:
             old_tail = self.snake.pop()
             self.snake_set.discard(old_tail)
-            self.free_tiles.add(old_tail)
+            self._add_free_tile(old_tail)
 
         self.replenish_apples()
         if not self.free_tiles:
@@ -142,10 +169,9 @@ class SnakeGame:
         """Keep spawning apples until configured count is reached or board is full."""
         target = min(self.config.apples, len(self.free_tiles))
         while len(self.apples) < target and self.free_tiles:
-            # Python 3.13 random.sample requires a sequence (set is not accepted).
-            pos = random.choice(tuple(self.free_tiles))
+            pos = self.free_tiles[random.randrange(len(self.free_tiles))]
             self.apples.add(pos)
-            self.free_tiles.discard(pos)
+            self._remove_free_tile(pos)
 
     def queue_direction(self, new_direction: str) -> None:
         """Queue an input direction; reject instant 180-degree turns."""

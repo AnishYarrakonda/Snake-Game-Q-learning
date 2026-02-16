@@ -29,6 +29,7 @@ try:
         TrainConfig,
         chunked_episode_stats,
         default_model_path,
+        make_game,
         run_episode,
     )
 except ImportError:
@@ -41,6 +42,7 @@ except ImportError:
         TrainConfig,
         chunked_episode_stats,
         default_model_path,
+        make_game,
         run_episode,
     )
 
@@ -359,6 +361,7 @@ class TrainingDashboard:
         def worker() -> None:
             try:
                 recent_scores: deque[float] = deque(maxlen=50)
+                episode_game = make_game(cfg)
 
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
                     if self.stop_event.is_set():
@@ -384,6 +387,7 @@ class TrainingDashboard:
                         train=True,
                         render_step=on_step,
                         stop_flag=self.stop_event,
+                        game=episode_game,
                     )
                     self.agent.decay_epsilon()
 
@@ -426,6 +430,7 @@ class TrainingDashboard:
 
                 recent_scores: deque[float] = deque(maxlen=50)
                 max_watch_episodes = 100000
+                episode_game = make_game(watch_cfg)
 
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
                     if self.stop_event.is_set():
@@ -451,6 +456,7 @@ class TrainingDashboard:
                         train=False,
                         render_step=on_step,
                         stop_flag=self.stop_event,
+                        game=episode_game,
                     )
 
                     recent_scores.append(float(score))

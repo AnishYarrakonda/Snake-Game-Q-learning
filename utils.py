@@ -157,9 +157,16 @@ def run_episode(
     train: bool = True,
     render_step: Callable[[SnakeGame, int, int, float], None] | None = None,
     stop_flag: threading.Event | None = None,
+    game: SnakeGame | None = None,
 ) -> tuple[int, float, int]:
     """Run one episode and optionally train the agent online from each transition."""
-    game = make_game(cfg)
+    if game is None:
+        game = make_game(cfg)
+    elif game.config.grid_size != cfg.board_size or game.config.apples != cfg.apples:
+        game = make_game(cfg)
+    else:
+        game.reset()
+
     total_reward = 0.0
     steps_taken = 0
     board_capacity = cfg.board_size * cfg.board_size

@@ -45,6 +45,7 @@ Plot behavior:
 - top subplot: mean length per 50 episodes + median per 25 episodes with IQR band
 - bottom subplot: histogram of episode lengths (distribution)
 - console status uses rolling `Avg50`
+- episode ends as a win when the board is fully filled by the snake
 
 ### 2) Watch training / watch model play (dashboard)
 
