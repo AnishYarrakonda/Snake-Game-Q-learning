@@ -293,9 +293,9 @@ def _prompt_float(label: str, default: float, min_value: float | None = None, ma
 
 
 def _prompt_bool(label: str, default: bool) -> bool:
-    default_text = "Y/n" if default else "y/N"
+    default_hint = "y" if default else "n"
     while True:
-        raw = input(f"{label} ({default_text}): ").strip()
+        raw = input(f"{label} (y/n) [default: {default_hint}]: ").strip()
         raw_l = raw.lower()
         if raw == "" or raw_l == "default":
             return default

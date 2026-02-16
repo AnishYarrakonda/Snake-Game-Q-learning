@@ -30,29 +30,29 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 
 @dataclass
 class TrainConfig:
-    board_size: int = 20
-    apples: int = 3
-    episodes: int = 3000
-    max_steps: int = 600
+    board_size: int = 10
+    apples: int = 5
+    episodes: int = 30000
+    max_steps: int = 250
     gamma: float = 0.90
-    lr: float = 0.001
+    lr: float = 0.0005
     epsilon_start: float = 1.0
-    epsilon_min: float = 0.01
-    epsilon_decay: float = 0.99
+    epsilon_min: float = 0.02
+    epsilon_decay: float = 0.999
     batch_size: int = 1000
     memory_size: int = 80_000
     hidden_dim: int = 256
     target_update_every: int = 200
     step_delay: float = 0.0
-    distance_reward_shaping: bool = False
+    distance_reward_shaping: bool = True
     state_encoding: str = "compact11"  # compact11 | board
     stall_limit_factor: int = 100
     stall_penalty: float = -5.0
-    reward_step: float = 0.0
+    reward_step: float = -0.01
     reward_apple: float = 10.0
-    penalty_death: float = -10.0
-    reward_win: float = 20.0
-    distance_reward_delta: float = 0.2
+    penalty_death: float = -20.0
+    reward_win: float = 50.0
+    distance_reward_delta: float = 0.25
 
 
 class AgentLike(Protocol):
