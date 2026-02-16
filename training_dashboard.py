@@ -370,6 +370,8 @@ class TrainingDashboard:
             return
 
         self._sync_agent_to_cfg(cfg)
+        print(f"\nUsing device: {self.agent.device}\n")
+        self.status_var.set(f"Ready | Device: {self.agent.device}")
         self._clear_series()
 
         def worker() -> None:
