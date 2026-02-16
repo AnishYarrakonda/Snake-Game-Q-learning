@@ -35,17 +35,17 @@ class TrainConfig:
     episodes: int = 30000
     max_steps: int = 250
     gamma: float = 0.90
-    lr: float = 0.0005
+    lr: float = 0.0003
     epsilon_start: float = 1.0
-    epsilon_min: float = 0.02
+    epsilon_min: float = 0.05
     epsilon_decay: float = 0.999
     batch_size: int = 1000
     memory_size: int = 80_000
     hidden_dim: int = 256
-    target_update_every: int = 200
+    target_update_every: int = 1000
     step_delay: float = 0.0
     distance_reward_shaping: bool = True
-    state_encoding: str = "compact11"  # compact11 | board
+    state_encoding: str = "board"  # compact11 | board
     stall_limit_factor: int = 100
     stall_penalty: float = -5.0
     reward_step: float = -0.01
@@ -53,6 +53,21 @@ class TrainConfig:
     penalty_death: float = -20.0
     reward_win: float = 50.0
     distance_reward_delta: float = 0.25
+    survival_reward_base: float = 1.0
+
+
+@dataclass(frozen=True)
+class EpisodeDynamics:
+    gamma: float
+    n_step: int
+    long_term_weight: float
+    distance_weight: float
+    survival_weight: float
+    lr: float
+    epsilon: float
+    target_update_mode: str  # hard | soft
+    target_update_every: int
+    target_soft_tau: float
 
 
 class AgentLike(Protocol):
@@ -62,9 +77,18 @@ class AgentLike(Protocol):
 
     def select_action(self, state: np.ndarray, valid_indices: list[int], explore: bool = True) -> int: ...
 
-    def remember(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool) -> None: ...
+    def remember(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        next_state: np.ndarray,
+        done: bool,
+        discount: float,
+    ) -> None: ...
 
     def train_step(self) -> float | None: ...
+    def apply_episode_dynamics(self, dynamics: EpisodeDynamics) -> None: ...
 
 
 def default_model_path(board_size: int, state_encoding: str = "compact11") -> str:
@@ -73,25 +97,14 @@ def default_model_path(board_size: int, state_encoding: str = "compact11") -> st
 
 
 def encode_board_state(game: SnakeGame, board_size: int) -> np.ndarray:
-    """
-    Flattened board encoding:
-    - 0.0: empty
-    - 0.5: apple
-    - -0.5: snake body
-    - 1.0: snake head
-    """
-    board = np.zeros((board_size, board_size), dtype=np.float32)
-
+    """3-channel board tensor: head, body, apples."""
+    board = np.zeros((3, board_size, board_size), dtype=np.float32)
     for x, y in game.apples:
-        board[y, x] = 0.5
-
+        board[2, y, x] = 1.0
     for idx, (x, y) in enumerate(game.snake):
-        if idx == 0:
-            board[y, x] = 1.0
-        else:
-            board[y, x] = -0.5
-
-    return board.reshape(-1)
+        channel = 0 if idx == 0 else 1
+        board[channel, y, x] = 1.0
+    return board
 
 
 def _is_collision(game: SnakeGame, x: int, y: int) -> bool:
@@ -172,6 +185,93 @@ def nearest_apple_distance(game: SnakeGame) -> int:
     ax, ay = nearest_apple_position(game)
     hx, hy = game.snake[0]
     return abs(ax - hx) + abs(ay - hy)
+
+
+def _linear_interp(episode: int, start_ep: int, end_ep: int, start_value: float, end_value: float) -> float:
+    if episode <= start_ep:
+        return start_value
+    if episode >= end_ep:
+        return end_value
+    ratio = (episode - start_ep) / float(end_ep - start_ep)
+    return start_value + ratio * (end_value - start_value)
+
+
+def episode_dynamics(episode: int) -> EpisodeDynamics:
+    # Gamma: 0-500 => 0.90, 500-5000 => 0.97, 5000+ => 0.99
+    if episode <= 500:
+        gamma = 0.90
+    elif episode <= 5000:
+        gamma = _linear_interp(episode, 500, 5000, 0.90, 0.97)
+    else:
+        gamma = 0.99
+
+    # N-step schedule.
+    if episode < 2000:
+        n_step = 1
+    elif episode < 5000:
+        n_step = 3
+    else:
+        n_step = 5
+
+    # Long-term target weighting.
+    if episode <= 500:
+        long_term_weight = 0.5
+    elif episode <= 3000:
+        long_term_weight = _linear_interp(episode, 500, 3000, 0.5, 1.0)
+    else:
+        long_term_weight = 1.2
+
+    # Reward shaping schedule.
+    if episode < 2000:
+        distance_weight = 0.2
+        survival_weight = 0.05
+    elif episode < 5000:
+        distance_weight = 0.1
+        survival_weight = 0.1
+    else:
+        distance_weight = 0.05
+        survival_weight = 0.2
+
+    # Learning-rate schedule.
+    if episode < 5000:
+        lr = 3e-4
+    elif episode < 10000:
+        lr = 1e-4
+    else:
+        lr = 5e-5
+
+    # Epsilon schedule with periodic exploration spikes.
+    if episode <= 2000:
+        epsilon = _linear_interp(episode, 1, 2000, 1.0, 0.3)
+    elif episode <= 10000:
+        epsilon = _linear_interp(episode, 2000, 10000, 0.3, 0.05)
+    else:
+        epsilon = 0.05
+    if episode > 0 and ((episode - 1) % 5000) < 200:
+        epsilon = max(epsilon, 0.2)
+
+    # Target net updates: hard first, then soft.
+    if episode < 3000:
+        target_update_mode = "hard"
+        target_update_every = 1000
+        target_soft_tau = 0.0
+    else:
+        target_update_mode = "soft"
+        target_update_every = 1000
+        target_soft_tau = 0.005
+
+    return EpisodeDynamics(
+        gamma=gamma,
+        n_step=n_step,
+        long_term_weight=long_term_weight,
+        distance_weight=distance_weight,
+        survival_weight=survival_weight,
+        lr=lr,
+        epsilon=epsilon,
+        target_update_mode=target_update_mode,
+        target_update_every=target_update_every,
+        target_soft_tau=target_soft_tau,
+    )
 
 
 def chunked_episode_stats(
@@ -274,6 +374,7 @@ def make_game(cfg: TrainConfig) -> SnakeGame:
 def run_episode(
     agent: AgentLike,
     cfg: TrainConfig,
+    episode_index: int = 1,
     train: bool = True,
     render_step: Callable[[SnakeGame, int, int, float], None] | None = None,
     stop_flag: threading.Event | None = None,
@@ -287,12 +388,35 @@ def run_episode(
     else:
         game.reset()
 
+    dynamics = episode_dynamics(episode_index)
+    if train:
+        agent.apply_episode_dynamics(dynamics)
+
     total_reward = 0.0
     steps_taken = 0
     board_capacity = cfg.board_size * cfg.board_size
     use_distance_shaping = cfg.distance_reward_shaping
     state = encode_state(game, cfg)
     stagnation_steps = 0
+    n_step_buffer: list[tuple[np.ndarray, int, float, np.ndarray, bool]] = []
+
+    def flush_one_transition() -> None:
+        if not n_step_buffer:
+            return
+        horizon = min(dynamics.n_step, len(n_step_buffer))
+        reward_sum = 0.0
+        for idx in range(horizon):
+            reward_sum += (dynamics.gamma**idx) * n_step_buffer[idx][2]
+            if n_step_buffer[idx][4]:
+                horizon = idx + 1
+                break
+
+        first_state, first_action = n_step_buffer[0][0], n_step_buffer[0][1]
+        next_state = n_step_buffer[horizon - 1][3]
+        done = n_step_buffer[horizon - 1][4]
+        discount = dynamics.gamma**horizon
+        agent.remember(first_state, first_action, reward_sum, next_state, done, discount)
+        n_step_buffer.pop(0)
 
     for step in range(cfg.max_steps):
         if stop_flag and stop_flag.is_set():
@@ -332,15 +456,23 @@ def run_episode(
         elif use_distance_shaping:
             new_distance = nearest_apple_distance(game)
             if new_distance < old_distance:
-                reward += cfg.distance_reward_delta
+                reward += cfg.distance_reward_delta * dynamics.distance_weight
             elif new_distance > old_distance:
-                reward -= cfg.distance_reward_delta
+                reward -= cfg.distance_reward_delta * dynamics.distance_weight
+
+        if alive and not won and not stalled:
+            reward += cfg.survival_reward_base * dynamics.survival_weight
 
         done = (not alive) or won or stalled
         next_state = encode_state(game, cfg)
 
         if train:
-            agent.remember(state, action_idx, reward, next_state, done)
+            n_step_buffer.append((state, action_idx, reward, next_state, done))
+            if len(n_step_buffer) >= dynamics.n_step:
+                flush_one_transition()
+            if done:
+                while n_step_buffer:
+                    flush_one_transition()
             agent.train_step()
 
         total_reward += reward

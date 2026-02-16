@@ -1,4 +1,4 @@
-# Snake Game (Q-Learning / DQN)
+# Snake Game (DQN with Phase Curriculum)
 
 This project has three main ways to run Snake:
 - train offline (headless, optional live matplotlib plot)
@@ -34,16 +34,15 @@ Quick-start `default` runs with plotting disabled for faster training.
 Useful options:
 
 ```bash
-python3 train_offline.py --board-size 20 --apples 3 --episodes 3000 --max-steps 600
+python3 train_offline.py --board-size 20 --apples 3
 python3 train_offline.py --no-plot
-python3 train_offline.py --state-encoding compact11
-python3 train_offline.py --no-distance-shaping
-python3 train_offline.py --load models/snake_dqn_compact11_20x20.pt --save models/my_model.pt
+python3 train_offline.py --load models/snake_dqn_board_20x20.pt --save models/my_model.pt
 ```
 
 This trains the model and saves a `.pt` file
 (default: `models/snake_dqn_compact11_<board>x<board>.pt`).
-`compact11` is the Patrick-style state representation and is the default.
+Backend defaults now control strategy automatically (gamma, n-step returns, reward weighting,
+epsilon schedule, learning-rate schedule, and target update behavior).
 
 Plot behavior:
 - top subplot: average length per 10 episodes (simple line)
@@ -59,18 +58,11 @@ Run:
 python3 training_dashboard.py
 ```
 
-Or the compatibility launcher:
-
-```bash
-python3 qlearning_agent.py
-```
-
 Inside the dashboard:
 - `Train`: trains the agent and shows board + live episode graph
 - `Watch`: runs the model in play mode (`epsilon=0`) so you can watch it play
 - `Anim delay (ms)` slider: controls animation speed in training/watch playback
-- `Apply Changes`: applies most hyperparameter/reward updates live during training
-  (`board`, `apples`, and `episodes` are locked while a run is active)
+- Most learning hyperparameters are backend-controlled by curriculum (not exposed in UI)
 - `Visual Theme`: customize snake/apple/grid/background/border colors using hex or color picker
 - `Load`: load a saved `.pt` model
 - `Save`: save current model
@@ -84,12 +76,6 @@ Run:
 python3 snake_gui.py
 ```
 
-Or the compatibility launcher:
-
-```bash
-python3 gui.py
-```
-
 Controls:
 - movement: arrow keys or `W A S D`
 - pause/resume: `Space`
@@ -98,7 +84,5 @@ Controls:
 
 - `train_offline.py`: offline/headless training entry point
 - `training_dashboard.py`: GUI dashboard for train/watch/load/save
-- `qlearning_agent.py`: launcher for dashboard
 - `snake_gui.py`: manual playable Snake
-- `gui.py`: launcher for manual Snake GUI
 - `models/`: saved DQN checkpoints (`.pt`)

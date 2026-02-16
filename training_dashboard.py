@@ -106,22 +106,6 @@ class TrainingDashboard:
 
         self.board_var = tk.StringVar(value=str(self.cfg.board_size))
         self.apple_var = tk.StringVar(value=str(self.cfg.apples))
-        self.episodes_var = tk.StringVar(value=str(self.cfg.episodes))
-        self.max_steps_var = tk.StringVar(value=str(self.cfg.max_steps))
-        self.eps_decay_var = tk.StringVar(value=str(self.cfg.epsilon_decay))
-        self.eps_min_var = tk.StringVar(value=str(self.cfg.epsilon_min))
-        self.gamma_var = tk.StringVar(value=str(self.cfg.gamma))
-        self.lr_var = tk.StringVar(value=str(self.cfg.lr))
-        self.batch_size_var = tk.StringVar(value=str(self.cfg.batch_size))
-        self.target_update_var = tk.StringVar(value=str(self.cfg.target_update_every))
-        self.reward_step_var = tk.StringVar(value=str(self.cfg.reward_step))
-        self.reward_apple_var = tk.StringVar(value=str(self.cfg.reward_apple))
-        self.penalty_death_var = tk.StringVar(value=str(self.cfg.penalty_death))
-        self.reward_win_var = tk.StringVar(value=str(self.cfg.reward_win))
-        self.distance_delta_var = tk.StringVar(value=str(self.cfg.distance_reward_delta))
-        self.stall_factor_var = tk.StringVar(value=str(self.cfg.stall_limit_factor))
-        self.stall_penalty_var = tk.StringVar(value=str(self.cfg.stall_penalty))
-        self.distance_shaping_var = tk.BooleanVar(value=self.cfg.distance_reward_shaping)
         self.anim_delay_var = tk.DoubleVar(value=0.0)
         self.snake_head_color_var = tk.StringVar(value="#45d483")
         self.snake_body_color_var = tk.StringVar(value="#1fb86b")
@@ -139,22 +123,10 @@ class TrainingDashboard:
 
         self._add_dropdown(left_col, "Board", self.board_var, [str(v) for v in BOARD_SIZES])
         self._add_dropdown(left_col, "Apples", self.apple_var, [str(v) for v in APPLE_CHOICES])
-        self._add_entry(left_col, "Episodes", self.episodes_var)
-        self._add_entry(left_col, "Max steps", self.max_steps_var)
-        self._add_entry(left_col, "Epsilon decay", self.eps_decay_var)
-        self._add_entry(left_col, "Epsilon min", self.eps_min_var)
-        self._add_entry(left_col, "Gamma", self.gamma_var)
-        self._add_entry(left_col, "Learning rate", self.lr_var)
-        self._add_entry(left_col, "Batch size", self.batch_size_var)
-        self._add_entry(left_col, "Target update", self.target_update_var)
-
-        self._add_entry(right_col, "Step reward", self.reward_step_var)
-        self._add_entry(right_col, "Apple reward", self.reward_apple_var)
-        self._add_entry(right_col, "Death penalty", self.penalty_death_var)
-        self._add_entry(right_col, "Win reward", self.reward_win_var)
-        self._add_entry(right_col, "Distance delta", self.distance_delta_var)
-        self._add_entry(right_col, "Stall factor", self.stall_factor_var)
-        self._add_entry(right_col, "Stall penalty", self.stall_penalty_var)
+        self._add_info(right_col, "Policy", "Backend phase scheduler")
+        self._add_info(right_col, "Gamma/N-step", "Automatic curriculum")
+        self._add_info(right_col, "Rewards/LR/Epsilon", "Automatic curriculum")
+        self._add_info(right_col, "Target updates", "Hard -> Soft auto switch")
         self._add_slider(right_col, "Anim delay (ms)", self.anim_delay_var, 0, 150, 5)
 
         visuals = tk.LabelFrame(
@@ -176,22 +148,10 @@ class TrainingDashboard:
         self._add_color_row(visuals, "Board bg", self.board_bg_color_var)
         self._add_color_row(visuals, "Border", self.border_color_var)
 
-        tk.Checkbutton(
-            left_col,
-            text="Use distance reward shaping",
-            variable=self.distance_shaping_var,
-            bg=self.PANEL_BG,
-            fg=self.TEXT_MUTED,
-            activebackground=self.PANEL_BG,
-            activeforeground=self.TEXT,
-            selectcolor=self.PANEL_BG,
-        ).pack(anchor="w", pady=(8, 0))
-
         btn_row = tk.Frame(controls, bg=self.PANEL_BG)
         btn_row.pack(fill="x", pady=(8, 0))
 
         self._make_btn(btn_row, "Train", self.start_training, w=10).pack(side="left", padx=2)
-        self._make_btn(btn_row, "Apply Changes", self.apply_runtime_changes, w=12).pack(side="left", padx=2)
         self._make_btn(btn_row, "Watch", self.start_watch, w=10).pack(side="left", padx=2)
         self._make_btn(btn_row, "Stop", self.stop_worker, w=10).pack(side="left", padx=2)
         self._make_btn(btn_row, "Load", self.load_model, w=10).pack(side="left", padx=2)
@@ -252,6 +212,12 @@ class TrainingDashboard:
         )
         dropdown["menu"].config(bg="#e8eef5", fg="#112033", activebackground="#d7e4f1", activeforeground="#112033")
         dropdown.pack(side="left", fill="x", expand=True)
+
+    def _add_info(self, parent: tk.Widget, label: str, value: str) -> None:
+        row = tk.Frame(parent, bg=self.PANEL_BG)
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text=label, bg=self.PANEL_BG, fg=self.TEXT_MUTED, width=12, anchor="w").pack(side="left")
+        tk.Label(row, text=value, bg=self.PANEL_BG, fg=self.TEXT, anchor="w").pack(side="left")
 
     def _add_slider(
         self,
@@ -350,72 +316,19 @@ class TrainingDashboard:
     def _read_cfg_from_ui(self) -> TrainConfig:
         board_size = int(self.board_var.get())
         apples = int(self.apple_var.get())
-        episodes = int(self.episodes_var.get())
-        max_steps = int(self.max_steps_var.get())
-        eps_decay = float(self.eps_decay_var.get())
-        eps_min = float(self.eps_min_var.get())
-        gamma = float(self.gamma_var.get())
-        lr = float(self.lr_var.get())
-        batch_size = int(self.batch_size_var.get())
-        target_update_every = int(self.target_update_var.get())
-        reward_step = float(self.reward_step_var.get())
-        reward_apple = float(self.reward_apple_var.get())
-        penalty_death = float(self.penalty_death_var.get())
-        reward_win = float(self.reward_win_var.get())
-        distance_reward_delta = float(self.distance_delta_var.get())
-        stall_limit_factor = int(self.stall_factor_var.get())
-        stall_penalty = float(self.stall_penalty_var.get())
-        distance_reward_shaping = bool(self.distance_shaping_var.get())
         anim_delay_ms = float(self.anim_delay_var.get())
 
         if board_size not in BOARD_SIZES:
             raise ValueError("Board size must be 10, 20, 30, or 40.")
         if apples not in APPLE_CHOICES:
             raise ValueError("Apples must be 1, 3, 5, or 10.")
-        if episodes <= 0 or max_steps <= 0:
-            raise ValueError("Episodes and max steps must be > 0.")
-        if not (0.9 <= eps_decay <= 0.99999):
-            raise ValueError("Epsilon decay must be between 0.9 and 0.99999.")
-        if not (0.0 <= eps_min <= 1.0):
-            raise ValueError("Epsilon min must be in [0, 1].")
-        if not (0.0 < gamma <= 1.0):
-            raise ValueError("Gamma must be in (0, 1].")
-        if lr <= 0:
-            raise ValueError("Learning rate must be > 0.")
-        if batch_size <= 0:
-            raise ValueError("Batch size must be > 0.")
-        if target_update_every <= 0:
-            raise ValueError("Target update must be > 0.")
-        if penalty_death > 0:
-            raise ValueError("Death penalty should be <= 0.")
-        if stall_penalty > 0:
-            raise ValueError("Stall penalty should be <= 0.")
-        if stall_limit_factor <= 0:
-            raise ValueError("Stall factor should be > 0.")
-        if distance_reward_delta < 0:
-            raise ValueError("Distance reward delta should be >= 0.")
         if not (0 <= anim_delay_ms <= 1000):
             raise ValueError("Animation delay must be between 0 and 1000 ms.")
 
-        return TrainConfig(
+        return replace(
+            TrainConfig(),
             board_size=board_size,
             apples=apples,
-            episodes=episodes,
-            max_steps=max_steps,
-            gamma=gamma,
-            epsilon_decay=eps_decay,
-            epsilon_min=eps_min,
-            lr=lr,
-            batch_size=batch_size,
-            target_update_every=target_update_every,
-            reward_step=reward_step,
-            reward_apple=reward_apple,
-            penalty_death=penalty_death,
-            reward_win=reward_win,
-            distance_reward_delta=distance_reward_delta,
-            stall_limit_factor=stall_limit_factor,
-            stall_penalty=stall_penalty,
-            distance_reward_shaping=distance_reward_shaping,
             step_delay=anim_delay_ms / 1000.0,
         )
 
@@ -425,59 +338,20 @@ class TrainingDashboard:
             self.agent = SnakeDQNAgent(cfg)
             return
 
-        # Same model shape; keep weights, update training hyperparameters.
+        # Same model shape; keep weights and update runtime config.
         self.cfg = cfg
         self.agent.cfg = cfg
-        for group in self.agent.optimizer.param_groups:
-            group["lr"] = cfg.lr
 
     def _set_runtime_cfg(self, cfg: TrainConfig) -> None:
         with self.cfg_lock:
             self.runtime_cfg = cfg
             self.cfg = cfg
             self.agent.cfg = cfg
-            for group in self.agent.optimizer.param_groups:
-                group["lr"] = cfg.lr
-
     def _get_runtime_cfg(self) -> TrainConfig:
         with self.cfg_lock:
             if self.runtime_cfg is None:
                 return self.cfg
             return replace(self.runtime_cfg)
-
-    def apply_runtime_changes(self) -> None:
-        try:
-            new_cfg = self._read_cfg_from_ui()
-            self._apply_visual_settings()
-        except ValueError as exc:
-            messagebox.showerror("Invalid Config", str(exc))
-            return
-
-        running = bool(self.worker and self.worker.is_alive())
-        if running and self.active_training_immutable is not None:
-            base_board, base_apples, base_episodes = self.active_training_immutable
-            immutable_changed = (
-                new_cfg.board_size != base_board
-                or new_cfg.apples != base_apples
-                or new_cfg.episodes != base_episodes
-            )
-            if immutable_changed:
-                messagebox.showwarning(
-                    "Immutable While Training",
-                    "Board, apples, and episodes cannot change during active training.\n"
-                    "Your other parameter changes were still applied.",
-                )
-                new_cfg = replace(new_cfg, board_size=base_board, apples=base_apples, episodes=base_episodes)
-                self.board_var.set(str(base_board))
-                self.apple_var.set(str(base_apples))
-                self.episodes_var.set(str(base_episodes))
-
-        self._sync_agent_to_cfg(new_cfg)
-        self._set_runtime_cfg(new_cfg)
-        self.status_var.set(
-            f"Changes applied | LR: {new_cfg.lr:.5f}, eps_min: {new_cfg.epsilon_min:.3f}, "
-            f"max_steps: {new_cfg.max_steps}, anim: {new_cfg.step_delay:.3f}s"
-        )
 
     def _draw_snapshot(self, snapshot: dict) -> None:
         size = snapshot["size"]
@@ -662,12 +536,12 @@ class TrainingDashboard:
                     score, _, _ = run_episode(
                         self.agent,
                         current_cfg,
+                        episode_index=episode,
                         train=True,
                         render_step=on_step,
                         stop_flag=self.stop_event,
                         game=episode_game,
                     )
-                    self.agent.decay_epsilon()
 
                     recent_scores.append(float(score))
                     avg = float(np.mean(recent_scores))
@@ -734,6 +608,7 @@ class TrainingDashboard:
                     score, _, _ = run_episode(
                         self.agent,
                         watch_cfg,
+                        episode_index=episode,
                         train=False,
                         render_step=on_step,
                         stop_flag=self.stop_event,
@@ -809,35 +684,6 @@ class TrainingDashboard:
             apples = int(cfg_data.get("apples", self.apple_var.get()))
             if apples in APPLE_CHOICES:
                 self.apple_var.set(str(apples))
-
-            if "epsilon_decay" in cfg_data:
-                self.eps_decay_var.set(str(cfg_data["epsilon_decay"]))
-            if "epsilon_min" in cfg_data:
-                self.eps_min_var.set(str(cfg_data["epsilon_min"]))
-            if "gamma" in cfg_data:
-                self.gamma_var.set(str(cfg_data["gamma"]))
-            if "lr" in cfg_data:
-                self.lr_var.set(str(cfg_data["lr"]))
-            if "batch_size" in cfg_data:
-                self.batch_size_var.set(str(cfg_data["batch_size"]))
-            if "target_update_every" in cfg_data:
-                self.target_update_var.set(str(cfg_data["target_update_every"]))
-            if "reward_step" in cfg_data:
-                self.reward_step_var.set(str(cfg_data["reward_step"]))
-            if "reward_apple" in cfg_data:
-                self.reward_apple_var.set(str(cfg_data["reward_apple"]))
-            if "penalty_death" in cfg_data:
-                self.penalty_death_var.set(str(cfg_data["penalty_death"]))
-            if "reward_win" in cfg_data:
-                self.reward_win_var.set(str(cfg_data["reward_win"]))
-            if "distance_reward_delta" in cfg_data:
-                self.distance_delta_var.set(str(cfg_data["distance_reward_delta"]))
-            if "stall_limit_factor" in cfg_data:
-                self.stall_factor_var.set(str(cfg_data["stall_limit_factor"]))
-            if "stall_penalty" in cfg_data:
-                self.stall_penalty_var.set(str(cfg_data["stall_penalty"]))
-            if "distance_reward_shaping" in cfg_data:
-                self.distance_shaping_var.set(bool(cfg_data["distance_reward_shaping"]))
 
             cfg = self._read_cfg_from_ui()
             cfg = replace(cfg, state_encoding=state_encoding)

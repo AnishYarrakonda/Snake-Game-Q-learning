@@ -129,14 +129,19 @@ def train_offline(
         if stop_flag and stop_flag.is_set():
             break
 
-        score, _, _ = run_episode(agent, cfg, train=True, stop_flag=stop_flag, game=episode_game)
+        score, _, _ = run_episode(
+            agent,
+            cfg,
+            episode_index=episode,
+            train=True,
+            stop_flag=stop_flag,
+            game=episode_game,
+        )
         scores.append(float(score))
         recent_10.append(float(score))
         recent_chunk.append(float(score))
         avg10 = float(np.mean(recent_10))
         avg10_scores.append(avg10)
-
-        agent.decay_epsilon()
 
         if episode_callback:
             episode_callback(episode, float(score), avg10, float(agent.epsilon))
@@ -210,24 +215,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Offline Snake DQN training")
     parser.add_argument("--board-size", type=int, default=defaults.board_size, choices=BOARD_SIZES)
     parser.add_argument("--apples", type=int, default=defaults.apples, choices=APPLE_CHOICES)
-    parser.add_argument("--episodes", type=int, default=defaults.episodes)
-    parser.add_argument("--max-steps", type=int, default=defaults.max_steps)
-    parser.add_argument("--epsilon-decay", type=float, default=defaults.epsilon_decay)
-    parser.add_argument("--epsilon-min", type=float, default=defaults.epsilon_min)
-    parser.add_argument("--lr", type=float, default=defaults.lr)
-    parser.add_argument("--reward-step", type=float, default=defaults.reward_step)
-    parser.add_argument("--reward-apple", type=float, default=defaults.reward_apple)
-    parser.add_argument("--penalty-death", type=float, default=defaults.penalty_death)
-    parser.add_argument("--reward-win", type=float, default=defaults.reward_win)
-    parser.add_argument("--distance-reward-delta", type=float, default=defaults.distance_reward_delta)
-    parser.add_argument("--stall-penalty", type=float, default=defaults.stall_penalty)
-    parser.add_argument(
-        "--state-encoding",
-        type=str,
-        default=defaults.state_encoding,
-        choices=("compact11", "board"),
-        help="State representation: compact11 is usually faster to learn than board.",
-    )
     parser.add_argument("--load", type=str, default="")
     parser.add_argument("--save", type=str, default="")
     parser.add_argument(
@@ -243,11 +230,10 @@ def parse_args() -> argparse.Namespace:
         help="Disable end-of-training average/median trend plot when live plot is off.",
     )
     parser.add_argument(
-        "--no-distance-shaping",
+        "--interactive",
         action="store_true",
-        help="Disable distance-based reward shaping for slightly faster training steps",
+        help="Prompt for settings in the terminal (board/apples/plot/load).",
     )
-    parser.add_argument("--interactive", action="store_true", help="Prompt for settings in the terminal")
     return parser.parse_args()
 
 
@@ -319,18 +305,6 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
 
     board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
-    episodes = _prompt_int("Episodes", default_cfg.episodes, min_value=1)
-    max_steps = _prompt_int("Max steps per episode", default_cfg.max_steps, min_value=1)
-    epsilon_decay = _prompt_float("Epsilon decay", default_cfg.epsilon_decay, min_value=0.9, max_value=0.99999)
-    epsilon_min = _prompt_float("Epsilon min", default_cfg.epsilon_min, min_value=0.0, max_value=1.0)
-    lr = _prompt_float("Learning rate", default_cfg.lr, min_value=1e-8)
-    reward_step = _prompt_float("Step reward", default_cfg.reward_step)
-    reward_apple = _prompt_float("Apple reward", default_cfg.reward_apple)
-    penalty_death = _prompt_float("Death penalty", default_cfg.penalty_death, max_value=0.0)
-    reward_win = _prompt_float("Win reward", default_cfg.reward_win)
-    distance_reward_delta = _prompt_float("Distance reward delta", default_cfg.distance_reward_delta, min_value=0.0)
-    stall_penalty = _prompt_float("Stall penalty", default_cfg.stall_penalty, max_value=0.0)
-    use_distance_shaping = _prompt_bool("Use distance-based reward shaping", default_cfg.distance_reward_shaping)
     show_plot = _prompt_bool("Show live matplotlib plot", False)
     print_every = _prompt_int("Print stats every N episodes", 25, min_value=1)
     show_final_trend_plot = _prompt_bool("Show end trend plot when live plot is off", True)
@@ -339,18 +313,6 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
     cfg = TrainConfig(
         board_size=board_size,
         apples=apples,
-        episodes=episodes,
-        max_steps=max_steps,
-        epsilon_decay=epsilon_decay,
-        epsilon_min=epsilon_min,
-        lr=lr,
-        reward_step=reward_step,
-        reward_apple=reward_apple,
-        penalty_death=penalty_death,
-        reward_win=reward_win,
-        distance_reward_delta=distance_reward_delta,
-        stall_penalty=stall_penalty,
-        distance_reward_shaping=use_distance_shaping,
         state_encoding=default_cfg.state_encoding,
     )
     load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
@@ -386,19 +348,7 @@ def run_offline_training_cli() -> None:
         cfg = TrainConfig(
             board_size=args.board_size,
             apples=args.apples,
-            episodes=args.episodes,
-            max_steps=args.max_steps,
-            epsilon_decay=args.epsilon_decay,
-            epsilon_min=args.epsilon_min,
-            lr=args.lr,
-            reward_step=args.reward_step,
-            reward_apple=args.reward_apple,
-            penalty_death=args.penalty_death,
-            reward_win=args.reward_win,
-            distance_reward_delta=args.distance_reward_delta,
-            stall_penalty=args.stall_penalty,
-            distance_reward_shaping=not args.no_distance_shaping,
-            state_encoding=args.state_encoding,
+            state_encoding=TrainConfig().state_encoding,
         )
         load_path = args.load if args.load else None
         save_path = args.save if args.save else None

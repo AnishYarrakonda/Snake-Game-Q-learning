@@ -10,9 +10,9 @@ from torch import nn
 import torch.nn.functional as F
 
 try:
-    from .utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, TrainConfig
+    from .utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, EpisodeDynamics, TrainConfig
 except ImportError:
-    from utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, TrainConfig
+    from utils import ACTIONS, RELATIVE_ACTIONS, REVERSE_DIRECTION, TURN_LEFT, TURN_RIGHT, EpisodeDynamics, TrainConfig
 
 VALID_ACTIONS_BY_DIRECTION = {
     direction: [idx for idx, action in enumerate(ACTIONS) if action != REVERSE_DIRECTION[direction]]
@@ -20,8 +20,8 @@ VALID_ACTIONS_BY_DIRECTION = {
 }
 
 
-class QNetwork(nn.Module):
-    """Feed-forward network where input is the entire flattened board."""
+class MLPQNetwork(nn.Module):
+    """Feed-forward network used for compact vector state."""
 
     def __init__(self, input_size: int, hidden_dim: int = 256, output_size: int = 3) -> None:
         super().__init__()
@@ -37,13 +37,38 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
+class ConvQNetwork(nn.Module):
+    """Convolutional network for board tensor state."""
+
+    def __init__(self, board_size: int, output_size: int = 3) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.SiLU(),
+        )
+        flattened = 64 * board_size * board_size
+        self.head = nn.Sequential(
+            nn.Linear(flattened, 256),
+            nn.SiLU(),
+            nn.Linear(256, output_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = x.flatten(start_dim=1)
+        return self.head(x)
+
+
 class SnakeDQNAgent:
     """DQN agent with replay buffer, target network, and epsilon-greedy policy."""
 
     def __init__(self, cfg: TrainConfig, device: torch.device | None = None) -> None:
         self.cfg = cfg
         self.uses_relative_actions = cfg.state_encoding == "compact11"
-        self.input_size = 11 if cfg.state_encoding == "compact11" else cfg.board_size * cfg.board_size
         self.action_space = RELATIVE_ACTIONS if self.uses_relative_actions else ACTIONS
         if device is not None:
             self.device = device
@@ -52,24 +77,25 @@ class SnakeDQNAgent:
         else:
             self.device = torch.device("cpu")
 
-        self.policy_net = QNetwork(
-            self.input_size,
-            hidden_dim=cfg.hidden_dim,
-            output_size=len(self.action_space),
-        ).to(self.device)
-        self.target_net = QNetwork(
-            self.input_size,
-            hidden_dim=cfg.hidden_dim,
-            output_size=len(self.action_space),
-        ).to(self.device)
+        if self.uses_relative_actions:
+            self.policy_net = MLPQNetwork(11, hidden_dim=cfg.hidden_dim, output_size=len(self.action_space)).to(self.device)
+            self.target_net = MLPQNetwork(11, hidden_dim=cfg.hidden_dim, output_size=len(self.action_space)).to(self.device)
+        else:
+            self.policy_net = ConvQNetwork(cfg.board_size, output_size=len(self.action_space)).to(self.device)
+            self.target_net = ConvQNetwork(cfg.board_size, output_size=len(self.action_space)).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
         self.optimizer = torch.optim.AdamW(self.policy_net.parameters(), lr=cfg.lr, weight_decay=1e-5)
-        self.memory: deque[tuple[np.ndarray, int, float, np.ndarray, bool]] = deque(maxlen=cfg.memory_size)
+        self.memory: deque[tuple[np.ndarray, int, float, np.ndarray, bool, float]] = deque(maxlen=cfg.memory_size)
 
         self.epsilon = cfg.epsilon_start
         self.learn_steps = 0
+        self.gamma = cfg.gamma
+        self.long_term_weight = 1.0
+        self.target_update_mode = "hard"
+        self.target_update_every = cfg.target_update_every
+        self.target_soft_tau = 0.0
 
     def valid_action_indices(self, current_direction: str) -> list[int]:
         if self.uses_relative_actions:
@@ -98,8 +124,26 @@ class SnakeDQNAgent:
         best_in_valid = int(torch.argmax(valid_q).item())
         return int(valid_indices[best_in_valid])
 
-    def remember(self, state: np.ndarray, action: int, reward: float, next_state: np.ndarray, done: bool) -> None:
-        self.memory.append((state, action, reward, next_state, done))
+    def remember(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        next_state: np.ndarray,
+        done: bool,
+        discount: float,
+    ) -> None:
+        self.memory.append((state, action, reward, next_state, done, discount))
+
+    def apply_episode_dynamics(self, dynamics: EpisodeDynamics) -> None:
+        self.gamma = dynamics.gamma
+        self.long_term_weight = dynamics.long_term_weight
+        self.epsilon = dynamics.epsilon
+        self.target_update_mode = dynamics.target_update_mode
+        self.target_update_every = dynamics.target_update_every
+        self.target_soft_tau = dynamics.target_soft_tau
+        for group in self.optimizer.param_groups:
+            group["lr"] = dynamics.lr
 
     def train_step(self) -> float | None:
         if not self.memory:
@@ -107,13 +151,14 @@ class SnakeDQNAgent:
 
         sample_size = min(len(self.memory), self.cfg.batch_size)
         batch = random.sample(self.memory, sample_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        states, actions, rewards, next_states, dones, discounts = zip(*batch)
 
         states_t = torch.from_numpy(np.stack(states).astype(np.float32, copy=False)).to(self.device)
         actions_t = torch.from_numpy(np.fromiter(actions, dtype=np.int64, count=sample_size)).to(self.device)
         rewards_t = torch.from_numpy(np.fromiter(rewards, dtype=np.float32, count=sample_size)).to(self.device)
         next_states_t = torch.from_numpy(np.stack(next_states).astype(np.float32, copy=False)).to(self.device)
         dones_t = torch.from_numpy(np.fromiter(dones, dtype=np.float32, count=sample_size)).to(self.device)
+        discounts_t = torch.from_numpy(np.fromiter(discounts, dtype=np.float32, count=sample_size)).to(self.device)
 
         current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
@@ -122,7 +167,7 @@ class SnakeDQNAgent:
             next_actions = self.policy_net(next_states_t).argmax(dim=1, keepdim=True)
             next_q = self.target_net(next_states_t).gather(1, next_actions).squeeze(1)
 
-        target_q = rewards_t + self.cfg.gamma * next_q * (1.0 - dones_t)
+        target_q = rewards_t + self.long_term_weight * discounts_t * next_q * (1.0 - dones_t)
 
         loss = F.smooth_l1_loss(current_q, target_q)
         self.optimizer.zero_grad(set_to_none=True)
@@ -131,7 +176,11 @@ class SnakeDQNAgent:
         self.optimizer.step()
 
         self.learn_steps += 1
-        if self.learn_steps % self.cfg.target_update_every == 0:
+        if self.target_update_mode == "soft":
+            tau = self.target_soft_tau
+            for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
+                target_param.data.mul_(1.0 - tau).add_(policy_param.data, alpha=tau)
+        elif self.learn_steps % self.target_update_every == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
 
         return float(loss.item())
