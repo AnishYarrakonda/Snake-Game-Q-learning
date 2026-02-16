@@ -97,7 +97,21 @@ def train_offline(
     scores: list[float] = []
     avg10_scores: list[float] = []
     recent_10: deque[float] = deque(maxlen=10)
-    recent_50: deque[float] = deque(maxlen=50)
+    log_chunk_size = 25
+    recent_chunk: deque[float] = deque(maxlen=log_chunk_size)
+
+    print(f"\nUsing device: {agent.device}\n")
+
+    header = (
+        f"{'Episodes':^18}"
+        f"{'Last':^10}"
+        f"{'Avg':^10}"
+        f"{'Median':^10}"
+        f"{'Max':^10}"
+        f"{'Epsilon':^12}"
+    )
+    print(header)
+    print("-" * len(header))
 
     if show_plot:
         plt.ion()
@@ -113,7 +127,7 @@ def train_offline(
         score, _, _ = run_episode(agent, cfg, train=True, stop_flag=stop_flag, game=episode_game)
         scores.append(float(score))
         recent_10.append(float(score))
-        recent_50.append(float(score))
+        recent_chunk.append(float(score))
         avg10 = float(np.mean(recent_10))
         avg10_scores.append(avg10)
 
@@ -128,16 +142,22 @@ def train_offline(
             fig.canvas.flush_events() #type: ignore
             plt.pause(0.001)
 
-        if episode % 50 == 0:
-            avg50 = float(np.mean(recent_50))
-            median50 = float(np.median(recent_50))
-            max50 = float(np.max(recent_50))
-            range_start = episode - len(recent_50) + 1
-            print(
-                f"Episodes {range_start}-{episode}/{cfg.episodes} | "
-                f"Last: {score:.0f} | Avg50: {avg50:.2f} | Median50: {median50:.2f} | "
-                f"Max50: {max50:.0f} | Epsilon: {agent.epsilon:.4f}"
+        if episode % log_chunk_size == 0 or episode == cfg.episodes:
+            avg_chunk = float(np.mean(recent_chunk))
+            median_chunk = float(np.median(recent_chunk))
+            max_chunk = float(np.max(recent_chunk))
+            range_start = episode - len(recent_chunk) + 1
+            episode_label = f"{range_start}-{episode}/{cfg.episodes}"
+            row = (
+                f"{episode_label:^18}"
+                f"{score:^10.0f}"
+                f"{avg_chunk:^10.2f}"
+                f"{median_chunk:^10.2f}"
+                f"{max_chunk:^10.0f}"
+                f"{agent.epsilon:^12.4f}"
             )
+            print(row)
+            print()
 
     out_path = save_path or default_model_path(cfg.board_size, cfg.state_encoding)
     agent.save(out_path)

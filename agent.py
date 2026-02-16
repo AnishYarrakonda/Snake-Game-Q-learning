@@ -47,8 +47,6 @@ class SnakeDQNAgent:
         self.action_space = RELATIVE_ACTIONS if self.uses_relative_actions else ACTIONS
         if device is not None:
             self.device = device
-        elif torch.cuda.is_available():
-            self.device = torch.device("cuda")
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             self.device = torch.device("mps")
         else:

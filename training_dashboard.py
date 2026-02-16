@@ -98,6 +98,7 @@ class TrainingDashboard:
         self.eps_decay_var = tk.StringVar(value=str(self.cfg.epsilon_decay))
         self.eps_min_var = tk.StringVar(value=str(self.cfg.epsilon_min))
         self.lr_var = tk.StringVar(value=str(self.cfg.lr))
+        self.anim_delay_var = tk.DoubleVar(value=0.0)
 
         self._add_dropdown(controls, "Board", self.board_var, [str(v) for v in BOARD_SIZES])
         self._add_dropdown(controls, "Apples", self.apple_var, [str(v) for v in APPLE_CHOICES])
@@ -106,6 +107,7 @@ class TrainingDashboard:
         self._add_entry(controls, "Epsilon decay", self.eps_decay_var)
         self._add_entry(controls, "Epsilon min", self.eps_min_var)
         self._add_entry(controls, "Learning rate", self.lr_var)
+        self._add_slider(controls, "Anim delay (ms)", self.anim_delay_var, 0, 150, 5)
 
         btn_row = tk.Frame(controls, bg="#0f1720")
         btn_row.pack(fill="x", pady=(8, 0))
@@ -149,6 +151,32 @@ class TrainingDashboard:
         tk.Label(row, text=label, bg="#0f1720", fg="#dbe7f3", width=12, anchor="w").pack(side="left")
         tk.OptionMenu(row, var, *options).pack(side="left")
 
+    def _add_slider(
+        self,
+        parent: tk.Widget,
+        label: str,
+        var: tk.DoubleVar,
+        min_value: float,
+        max_value: float,
+        resolution: float,
+    ) -> None:
+        row = tk.Frame(parent, bg="#0f1720")
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text=label, bg="#0f1720", fg="#dbe7f3", width=12, anchor="w").pack(side="left")
+        tk.Scale(
+            row,
+            variable=var,
+            from_=min_value,
+            to=max_value,
+            resolution=resolution,
+            orient="horizontal",
+            showvalue=True,
+            length=220,
+            bg="#0f1720",
+            fg="#dbe7f3",
+            highlightthickness=0,
+        ).pack(side="left", fill="x", expand=True)
+
     def _read_cfg_from_ui(self) -> TrainConfig:
         board_size = int(self.board_var.get())
         apples = int(self.apple_var.get())
@@ -157,6 +185,7 @@ class TrainingDashboard:
         eps_decay = float(self.eps_decay_var.get())
         eps_min = float(self.eps_min_var.get())
         lr = float(self.lr_var.get())
+        anim_delay_ms = float(self.anim_delay_var.get())
 
         if board_size not in BOARD_SIZES:
             raise ValueError("Board size must be 10, 20, 30, or 40.")
@@ -170,6 +199,8 @@ class TrainingDashboard:
             raise ValueError("Epsilon min must be in (0, 1].")
         if lr <= 0:
             raise ValueError("Learning rate must be > 0.")
+        if not (0 <= anim_delay_ms <= 1000):
+            raise ValueError("Animation delay must be between 0 and 1000 ms.")
 
         return TrainConfig(
             board_size=board_size,
@@ -179,6 +210,7 @@ class TrainingDashboard:
             epsilon_decay=eps_decay,
             epsilon_min=eps_min,
             lr=lr,
+            step_delay=anim_delay_ms / 1000.0,
         )
 
     def _sync_agent_to_cfg(self, cfg: TrainConfig) -> None:
@@ -407,7 +439,7 @@ class TrainingDashboard:
         def worker() -> None:
             saved_epsilon = self.agent.epsilon
             try:
-                watch_cfg = replace(cfg, step_delay=0.05)
+                watch_cfg = cfg
                 self.agent.epsilon = 0.0
 
                 recent_scores: deque[float] = deque(maxlen=10)

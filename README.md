@@ -48,7 +48,7 @@ This trains the model and saves a `.pt` file
 Plot behavior:
 - top subplot: average length per 10 episodes (simple line)
 - bottom subplot: histogram of episode lengths (distribution)
-- console prints every 50 episodes with episode range, Avg50, Median50, Max50, and epsilon
+- console prints every 25 episodes with one table header (`Episodes`, `Last`, `Avg`, `Median`, `Max`, `Epsilon`)
 - episode ends as a win when the board is fully filled by the snake
 
 ### 2) Watch training / watch model play (dashboard)
@@ -68,6 +68,7 @@ python3 qlearning_agent.py
 Inside the dashboard:
 - `Train`: trains the agent and shows board + live episode graph
 - `Watch`: runs the model in play mode (`epsilon=0`) so you can watch it play
+- `Anim delay (ms)` slider: controls animation speed in training/watch playback
 - `Load`: load a saved `.pt` model
 - `Save`: save current model
 - `Stop`: stop current run
