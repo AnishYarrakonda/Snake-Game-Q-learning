@@ -65,12 +65,12 @@ def train_offline(
 
         if show_plot and (episode == 1 or episode % 10 == 0 or episode == cfg.episodes):
             x = np.arange(1, len(scores) + 1)
-            current_line.set_data(x, scores)
-            avg_line.set_data(x, avg_scores)
-            ax.relim()
-            ax.autoscale_view()
-            fig.canvas.draw_idle()
-            fig.canvas.flush_events()
+            current_line.set_data(x, scores) #type: ignore
+            avg_line.set_data(x, avg_scores) #type: ignore
+            ax.relim() #type: ignore
+            ax.autoscale_view() #type: ignore
+            fig.canvas.draw_idle() #type: ignore
+            fig.canvas.flush_events() #type: ignore
             plt.pause(0.001)
 
         if episode % 50 == 0:

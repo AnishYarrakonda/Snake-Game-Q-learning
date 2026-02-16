@@ -159,4 +159,4 @@ def run_episode(
         if done:
             break
 
-    return len(game.snake), total_reward, step + 1
+    return len(game.snake), total_reward, step + 1 #type: ignore

@@ -125,7 +125,7 @@ class TrainingDashboard:
         self.canvas = tk.Canvas(left, bg="#1c2229", width=700, height=700, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
-        fig = plt.Figure(figsize=(7, 5), dpi=100)
+        fig = plt.Figure(figsize=(7, 5), dpi=100) #type: ignore
         self.ax = fig.add_subplot(111)
         self.ax.set_title("Episode Length")
         self.ax.set_xlabel("Episode")
