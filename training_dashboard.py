@@ -591,19 +591,28 @@ class TrainingDashboard:
             )
 
     def _update_state_display(self, state: np.ndarray) -> None:
-        if len(state) != 16:
+        if len(state) != 32:
             return
 
         danger = state[0:4]
-        direction = state[4:8]
-        food = state[8:12]
-        safety = state[12:16]
+        direc = state[4:8]
+        food_d = state[8:12]
+        food_pos = state[12:15]
+        flood = state[15:19]
+        tail = state[19:23]
+        body_d = state[23:27]
+        length = state[27]
+        quads = state[28:32]
         lines = [
-            "Danger  [U D L R]: " + " ".join(f"{value:0.2f}" for value in danger),
-            "Dir     [U D L R]: " + " ".join(f"{value:0.2f}" for value in direction),
-            "Food    [U D L R]: " + " ".join(f"{value:0.2f}" for value in food),
-            "Safety  [U D L R]: " + " ".join(f"{value:0.2f}" for value in safety),
-            "Safety bars       : " + " ".join("#" * int(max(0.0, min(4.0, value)) * 4) for value in safety),
+            "Danger   [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in danger),
+            "Dir      [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in direc),
+            "Food dir [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in food_d),
+            "Food pos [dx dy dist]: " + "  ".join(f"{v:.2f}" for v in food_pos),
+            "Flood    [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in flood),
+            "Flood bars           : " + " ".join("#" * int(max(0.0, min(1.0, v)) * 8) for v in flood),
+            "Tail [reach dx dy d]: " + "  ".join(f"{v:.2f}" for v in tail),
+            "Body dist[U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in body_d),
+            f"Length norm: {length:.3f}   Quads [NW NE SW SE]: " + "  ".join(f"{v:.2f}" for v in quads),
         ]
         self.state_text.config(state="normal")
         self.state_text.delete("1.0", "end")

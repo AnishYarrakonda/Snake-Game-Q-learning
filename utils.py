@@ -22,6 +22,7 @@ ACTIONS = ("up", "down", "left", "right")
 REVERSE_DIRECTION = {"up": "down", "down": "up", "left": "right", "right": "left"}
 STATE_ENCODING_INTEGER = "integer12"
 SUPPORTED_STATE_ENCODINGS = (STATE_ENCODING_INTEGER, "compact11")
+STATE_SIZE = 32  # number of features in the encoded state vector
 MIN_HIDDEN_LAYERS = 1
 MAX_HIDDEN_LAYERS = 8
 MIN_NEURONS_PER_LAYER = 8
@@ -31,9 +32,6 @@ DEFAULT_HIDDEN_LAYERS = (128, 128, 64)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
-
-_ESCAPE_CACHE: dict[tuple[int, int, int, frozenset[tuple[int, int]]], int] = {}
-
 
 def _parse_positive_int(raw: str, label: str) -> int:
     try:
@@ -100,7 +98,7 @@ class TrainConfig:
     board_size: int = 10
     apples: int = 5
     episodes: int = 10000
-    max_steps: int = 2000
+    max_steps: int = 2000          # was 250 — must be large for late-game navigation
     gamma: float = 0.96
     lr: float = 0.001
     epsilon_start: float = 1.0
@@ -115,7 +113,7 @@ class TrainConfig:
     n_step: int = 5
     step_delay: float = 0.0
     state_encoding: str = STATE_ENCODING_INTEGER
-    stall_limit_factor: int = 75
+    stall_limit_factor: int = 60
     lr_start: float = 1e-3
     lr_end: float = 2e-4
     gamma_start: float = 0.96
@@ -123,14 +121,21 @@ class TrainConfig:
     epsilon_decay_rate: float = 8.0
     batch_size_start: int = 64
     batch_size_end: int = 128
-    food_reward_base: float = 1.5
-    food_reward_min: float = 0.8
-    survival_reward_start: float = 0.05
-    survival_reward_end: float = 0.20
+    # --- reward shaping ---
+    food_reward_base: float = 1.0      # reduced from 1.5: less greedy
+    food_reward_min: float = 0.6       # floor as training progresses
+    survival_reward_start: float = 0.04
+    survival_reward_end: float = 0.15
     death_reward: float = -2.0
+    # flood fill positioning bonus — reward agent for keeping more open space
+    flood_fill_bonus_weight: float = 0.03
+    # tail proximity bonus — reward agent for keeping escape route via tail
+    tail_bonus_weight: float = 0.01
+    # length penalty on death — dying longer is punished more
+    length_death_penalty_scale: float = 0.05
     terminal_bonus_alpha_start: float = 0.05
-    terminal_bonus_alpha_end: float = 0.15
-    terminal_bonus_power: float = 1.3
+    terminal_bonus_alpha_end: float = 0.20
+    terminal_bonus_power: float = 1.5   # more superlinear: winning big matters a lot
     q_explosion_threshold: float = 100.0
 
     def __post_init__(self) -> None:
@@ -192,6 +197,18 @@ def default_model_path(board_size: int, state_encoding: str = STATE_ENCODING_INT
     return os.path.join(MODELS_DIR, f"snake_dqn_{mode}_{board_size}x{board_size}.pt")
 
 
+# ---------------------------------------------------------------------------
+# State encoding — 32-feature spatial MLP input
+# ---------------------------------------------------------------------------
+
+_ESCAPE_CACHE: dict[tuple[int, int, frozenset[tuple[int, int]]], int] = {}
+
+
+def clear_escape_cache() -> None:
+    """Clear flood-fill cache to free memory (call every ~100 episodes)."""
+    _ESCAPE_CACHE.clear()
+
+
 def _is_collision(game: SnakeGame, x: int, y: int) -> bool:
     size = game.config.grid_size
     if x < 0 or x >= size or y < 0 or y >= size:
@@ -199,12 +216,82 @@ def _is_collision(game: SnakeGame, x: int, y: int) -> bool:
     return (x, y) in game.snake_set
 
 
+def _full_flood_fill(game: SnakeGame, start_x: int, start_y: int) -> int:
+    """
+    Count all cells reachable from (start_x, start_y) via BFS, treating the
+    snake body as walls but allowing the tail cell (it will vacate next tick).
+    Returns 0 if the start cell itself is a wall or out of bounds.
+    This gives the agent a board-wide sense of available space, not just
+    the 2-step lookahead of the old depth-limited version.
+    """
+    size = game.config.grid_size
+    if start_x < 0 or start_x >= size or start_y < 0 or start_y >= size:
+        return 0
+
+    # Tail vacates next tick — treat it as passable so agent can "chase" its tail
+    tail = game.snake[-1] if game.snake else None
+
+    if (start_x, start_y) in game.snake_set and (start_x, start_y) != tail:
+        return 0
+
+    # Cache using first 12 body segments for key (balance accuracy vs speed)
+    body_key = frozenset(list(game.snake)[:12])
+    cache_key = (start_x * size + start_y, size, body_key)
+    if cache_key in _ESCAPE_CACHE:
+        return _ESCAPE_CACHE[cache_key]
+
+    visited: set[tuple[int, int]] = {(start_x, start_y)}
+    queue: list[tuple[int, int]] = [(start_x, start_y)]
+    head = 0
+
+    while head < len(queue):
+        cx, cy = queue[head]
+        head += 1
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            nx, ny = cx + dx, cy + dy
+            if nx < 0 or nx >= size or ny < 0 or ny >= size:
+                continue
+            if (nx, ny) in visited:
+                continue
+            # Body blocks movement, except tail which will move away
+            if (nx, ny) in game.snake_set and (nx, ny) != tail:
+                continue
+            visited.add((nx, ny))
+            queue.append((nx, ny))
+
+    result = len(visited)
+    if len(_ESCAPE_CACHE) < 8000:
+        _ESCAPE_CACHE[cache_key] = result
+    return result
+
+
+def _nearest_body_distance(game: SnakeGame, hx: int, hy: int, dx: int, dy: int) -> float:
+    """
+    Scan in direction (dx, dy) from head and return normalized distance to the
+    first body segment or wall encountered. Returns 1.0 if the path is fully
+    clear to the board edge. Returns 0.0 if the very next cell is blocked.
+    This gives the agent a continuous danger signal instead of a binary one.
+    """
+    size = game.config.grid_size
+    max_dist = size  # maximum possible distance
+    x, y = hx + dx, hy + dy
+    steps = 1
+    while 0 <= x < size and 0 <= y < size:
+        if (x, y) in game.snake_set:
+            return 1.0 - (steps / max_dist)  # closer body = lower value
+        x += dx
+        y += dy
+        steps += 1
+    # Hit wall without hitting body: return distance to wall
+    return 1.0 - ((steps - 1) / max_dist)
+
+
 def nearest_apple_position(game: SnakeGame) -> tuple[int, int]:
     if not game.apples:
         return game.snake[0]
     hx, hy = game.snake[0]
-    best = None
-    best_dist = 10**9
+    best: tuple[int, int] | None = None
+    best_dist = 10 ** 9
     for ax, ay in game.apples:
         dist = abs(ax - hx) + abs(ay - hy)
         if dist < best_dist:
@@ -214,133 +301,149 @@ def nearest_apple_position(game: SnakeGame) -> tuple[int, int]:
 
 
 def _get_collision_info(game: SnakeGame, hx: int, hy: int) -> dict[str, bool]:
-    """Get immediate collision status for all 4 directions."""
+    """Immediate (1-step) collision check for all 4 directions."""
     return {
-        "up": _is_collision(game, hx, hy - 1),
-        "down": _is_collision(game, hx, hy + 1),
-        "left": _is_collision(game, hx - 1, hy),
+        "up":    _is_collision(game, hx, hy - 1),
+        "down":  _is_collision(game, hx, hy + 1),
+        "left":  _is_collision(game, hx - 1, hy),
         "right": _is_collision(game, hx + 1, hy),
     }
 
 
 def encode_integer_state(game: SnakeGame) -> np.ndarray:
-    """
-    Integer feature state:
-    [danger_up, danger_down, danger_left, danger_right,
-     dir_up, dir_down, dir_left, dir_right,
-     food_up, food_down, food_left, food_right]
-    """
+    """Legacy 12-feature encoder kept for backward compat. Not used in training."""
     hx, hy = game.snake[0]
     direction = game.direction
     ax, ay = nearest_apple_position(game)
     collisions = _get_collision_info(game, hx, hy)
-
-    state = np.array(
+    return np.array(
         [
-            int(collisions["up"]),
-            int(collisions["down"]),
-            int(collisions["left"]),
-            int(collisions["right"]),
-            int(direction == "up"),
-            int(direction == "down"),
-            int(direction == "left"),
-            int(direction == "right"),
-            int(ay < hy),
-            int(ay > hy),
-            int(ax < hx),
-            int(ax > hx),
+            int(collisions["up"]),   int(collisions["down"]),
+            int(collisions["left"]), int(collisions["right"]),
+            int(direction == "up"),  int(direction == "down"),
+            int(direction == "left"),int(direction == "right"),
+            int(ay < hy), int(ay > hy),
+            int(ax < hx), int(ax > hx),
         ],
         dtype=np.float32,
     )
-    return state
-
-
-def _count_escape_routes(game: SnakeGame, x: int, y: int, depth: int = 2) -> int:
-    """
-    Fast iterative BFS to count reachable cells within depth steps.
-    Caches results using snake body snapshot for efficiency.
-    """
-    size = game.config.grid_size
-
-    if x < 0 or x >= size or y < 0 or y >= size:
-        return 0
-    if (x, y) in game.snake_set and (x, y) != game.snake[0]:
-        return 0
-
-    body_key = frozenset(list(game.snake)[:10])
-    cache_key = (x, y, depth, body_key)
-    if cache_key in _ESCAPE_CACHE:
-        return _ESCAPE_CACHE[cache_key]
-
-    visited = {(x, y)}
-    queue: list[tuple[int, int, int]] = [(x, y, 0)]
-    head = 0
-
-    while head < len(queue):
-        cx, cy, d = queue[head]
-        head += 1
-
-        if d >= depth:
-            continue
-
-        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
-            nx, ny = cx + dx, cy + dy
-            if nx < 0 or nx >= size or ny < 0 or ny >= size:
-                continue
-            if (nx, ny) in visited:
-                continue
-            if (nx, ny) in game.snake_set and (nx, ny) != game.snake[0]:
-                continue
-            visited.add((nx, ny))
-            queue.append((nx, ny, d + 1))
-
-    result = len(visited)
-    if len(_ESCAPE_CACHE) < 5000:
-        _ESCAPE_CACHE[cache_key] = result
-    return result
-
-
-def clear_escape_cache() -> None:
-    """Clear escape route cache to free memory."""
-    _ESCAPE_CACHE.clear()
 
 
 def encode_integer_state_v2(game: SnakeGame) -> np.ndarray:
     """
-    Enhanced 16-feature state:
-    [0-3] danger per direction,
-    [4-7] current direction one-hot,
-    [8-11] food direction one-hot,
-    [12-15] normalized safety scores per direction.
+    Advanced 32-feature spatial state.
+
+    Layout:
+      [0-3]   Immediate danger per direction (binary)
+      [4-7]   Current direction one-hot
+      [8-11]  Food direction one-hot (is food in this direction?)
+      [12-13] Food offset: normalized signed dx, dy to nearest apple
+      [14]    Food manhattan distance normalized by board diagonal
+      [15-18] Full flood-fill fraction per adjacent direction
+              (reachable cells / total board cells — full BFS, not depth-limited)
+      [19]    Tail reachable from head (boolean): can the agent escape via tail?
+      [20-21] Tail offset: normalized signed dx, dy to tail tip
+      [22]    Tail manhattan distance normalized
+      [23-26] Nearest body distance per direction (continuous 0-1, not binary)
+      [27]    Snake length normalized by board capacity
+      [28-31] Body density per board quadrant (NW, NE, SW, SE)
     """
+    size = game.config.grid_size
+    board_capacity = float(size * size)
+    board_diagonal = float(size * 2 - 2)  # max manhattan distance
+
     hx, hy = game.snake[0]
     direction = game.direction
     ax, ay = nearest_apple_position(game)
     collisions = _get_collision_info(game, hx, hy)
 
-    safe_up = _count_escape_routes(game, hx, hy - 1, depth=2) / 4.0
-    safe_down = _count_escape_routes(game, hx, hy + 1, depth=2) / 4.0
-    safe_left = _count_escape_routes(game, hx - 1, hy, depth=2) / 4.0
-    safe_right = _count_escape_routes(game, hx + 1, hy, depth=2) / 4.0
+    # [0-3] Immediate danger
+    danger = [
+        float(collisions["up"]),
+        float(collisions["down"]),
+        float(collisions["left"]),
+        float(collisions["right"]),
+    ]
+
+    # [4-7] Direction one-hot
+    dir_vec = [
+        float(direction == "up"),
+        float(direction == "down"),
+        float(direction == "left"),
+        float(direction == "right"),
+    ]
+
+    # [8-11] Food direction (binary: is food generally in this direction?)
+    food_dir = [
+        float(ay < hy),   # food is above
+        float(ay > hy),   # food is below
+        float(ax < hx),   # food is left
+        float(ax > hx),   # food is right
+    ]
+
+    # [12-13] Food offset normalized (-1 to +1)
+    food_dx = float(ax - hx) / float(size)
+    food_dy = float(ay - hy) / float(size)
+
+    # [14] Food distance normalized
+    food_dist = float(abs(ax - hx) + abs(ay - hy)) / board_diagonal
+
+    # [15-18] Full flood fill per direction
+    fill_up    = _full_flood_fill(game, hx, hy - 1) / board_capacity
+    fill_down  = _full_flood_fill(game, hx, hy + 1) / board_capacity
+    fill_left  = _full_flood_fill(game, hx - 1, hy) / board_capacity
+    fill_right = _full_flood_fill(game, hx + 1, hy) / board_capacity
+
+    # [19] Tail reachable from head
+    # The tail tip is the "exit" when cornered — knowing it's reachable is critical
+    tx, ty = game.snake[-1]
+    tail_reachable = float(_full_flood_fill(game, tx, ty) > 0)
+
+    # [20-21] Tail offset normalized
+    tail_dx = float(tx - hx) / float(size)
+    tail_dy = float(ty - hy) / float(size)
+
+    # [22] Tail distance normalized
+    tail_dist = float(abs(tx - hx) + abs(ty - hy)) / board_diagonal
+
+    # [23-26] Nearest body distance in each direction (continuous)
+    body_up    = _nearest_body_distance(game, hx, hy, 0, -1)
+    body_down  = _nearest_body_distance(game, hx, hy, 0,  1)
+    body_left  = _nearest_body_distance(game, hx, hy, -1, 0)
+    body_right = _nearest_body_distance(game, hx, hy,  1, 0)
+
+    # [27] Snake length normalized
+    snake_length_norm = float(len(game.snake)) / board_capacity
+
+    # [28-31] Body density in each board quadrant (NW, NE, SW, SE)
+    mid = size // 2
+    body_list = list(game.snake)
+    total_body = float(max(1, len(body_list)))
+    nw = sum(1 for (bx, by) in body_list if bx < mid and by < mid) / total_body
+    ne = sum(1 for (bx, by) in body_list if bx >= mid and by < mid) / total_body
+    sw = sum(1 for (bx, by) in body_list if bx < mid and by >= mid) / total_body
+    se = sum(1 for (bx, by) in body_list if bx >= mid and by >= mid) / total_body
 
     state = np.array(
         [
-            int(collisions["up"]),
-            int(collisions["down"]),
-            int(collisions["left"]),
-            int(collisions["right"]),
-            int(direction == "up"),
-            int(direction == "down"),
-            int(direction == "left"),
-            int(direction == "right"),
-            int(ay < hy),
-            int(ay > hy),
-            int(ax < hx),
-            int(ax > hx),
-            safe_up,
-            safe_down,
-            safe_left,
-            safe_right,
+            # [0-3] immediate danger
+            danger[0], danger[1], danger[2], danger[3],
+            # [4-7] direction
+            dir_vec[0], dir_vec[1], dir_vec[2], dir_vec[3],
+            # [8-11] food direction
+            food_dir[0], food_dir[1], food_dir[2], food_dir[3],
+            # [12-14] food position
+            food_dx, food_dy, food_dist,
+            # [15-18] flood fill
+            fill_up, fill_down, fill_left, fill_right,
+            # [19-22] tail info
+            tail_reachable, tail_dx, tail_dy, tail_dist,
+            # [23-26] body distance
+            body_up, body_down, body_left, body_right,
+            # [27] length
+            snake_length_norm,
+            # [28-31] quadrant density
+            nw, ne, sw, se,
         ],
         dtype=np.float32,
     )
@@ -368,20 +471,45 @@ def episode_progress(episode: int, total_episodes: int) -> float:
 def episode_dynamics(episode: int, cfg: TrainConfig) -> EpisodeDynamics:
     progress = episode_progress(episode, cfg.episodes)
 
-    # Smooth schedules only: no abrupt switches in gamma/lr/epsilon/weights.
+    # Gamma: ramps from 0.96 -> 0.99 over training.
+    # Higher gamma later means agent thinks further ahead.
     gamma = cfg.gamma_start + (cfg.gamma_end - cfg.gamma_start) * (progress**0.5)
+
+    # Learning rate: decays from lr_start to 40% of lr_start
     lr = cfg.lr_start * (1.0 - 0.6 * progress)
+
+    # Epsilon: fast decay in first half, plateau in second half.
+    # Keeps some exploration during late-game where the agent needs to
+    # discover non-greedy strategies it would never try greedily.
     if progress < 0.5:
         epsilon = max(cfg.epsilon_min, cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * progress))
     else:
         mid_epsilon = cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * 0.5)
-        remaining_decay = (mid_epsilon - cfg.epsilon_min) * (1.0 - (progress - 0.5) * 2.0)
-        epsilon = max(cfg.epsilon_min, mid_epsilon - remaining_decay * 0.5)
+        # Slow continued decay in second half rather than rushing to minimum
+        remaining = mid_epsilon - cfg.epsilon_min
+        epsilon = max(cfg.epsilon_min, mid_epsilon - remaining * (progress - 0.5))
+
+    # Batch size: grows quadratically (small batches early, big batches late)
     batch_size = int(round(cfg.batch_size_start + (cfg.batch_size_end - cfg.batch_size_start) * (progress**2)))
     batch_size = max(cfg.batch_size_start, min(cfg.batch_size_end, batch_size))
 
-    food_reward = max(cfg.food_reward_min, cfg.food_reward_base * (1.0 - 0.5 * progress))
-    survival_reward = cfg.survival_reward_start + (cfg.survival_reward_end - cfg.survival_reward_start) * (progress**0.7)
+    # Food reward: decays faster than before. In late training the agent should
+    # stop being greedy about every apple and think about survivability first.
+    # Falls from food_reward_base to food_reward_min over training.
+    food_reward = max(
+        cfg.food_reward_min,
+        cfg.food_reward_base * (1.0 - 0.7 * progress),   # was 0.5 * progress
+    )
+
+    # Survival reward: grows with concave curve — reaches its ceiling faster
+    # so mid-game training already heavily rewards staying alive.
+    survival_reward = cfg.survival_reward_start + (
+        cfg.survival_reward_end - cfg.survival_reward_start
+    ) * (progress**0.5)   # was 0.7, now 0.5 — faster ramp
+
+    # Terminal bonus alpha: very aggressive superlinear growth.
+    # The agent should learn that a high-length terminal state is
+    # exponentially more valuable than a medium one.
     terminal_bonus_alpha = cfg.terminal_bonus_alpha_start + (
         cfg.terminal_bonus_alpha_end - cfg.terminal_bonus_alpha_start
     ) * (progress**1.5)
@@ -579,33 +707,64 @@ def run_episode(
         next_state = encode_state(game, cfg)
         next_direction = game.direction
 
-        # Dense rewards transition smoothly over training progress:
-        # early learning favors food discovery, late learning favors survival.
+        # --- Reward shaping ---
+        # Philosophy: less food greed, more survival, spatial positioning bonuses.
+
+        # Food: agent gets credit for eating, but reward decays with training
+        # to reduce the greedy apple-chasing that causes self-trapping.
         food_reward = dynamics.food_reward if new_length > old_length else 0.0
+
+        # Survival: small per-step reward for staying alive.
         survival_reward = dynamics.survival_reward if alive else 0.0
-        death_reward = dynamics.death_reward if (not alive or stalled) else 0.0
-        safety_bonus = 0.0
+
+        # Death/stall: flat penalty plus a length-scaled component.
+        # Dying at length 50 should hurt far more than dying at length 5
+        # because the agent has wasted far more accumulated progress.
+        death_reward = 0.0
+        if not alive or stalled:
+            length_penalty = cfg.length_death_penalty_scale * float(len(game.snake))
+            death_reward = dynamics.death_reward - length_penalty
+
+        # Flood fill bonus: reward moves that preserve more open space.
+        # Computed as the flood fill of the new head position normalized by
+        # board capacity. High open space = good position. This teaches the
+        # agent to prefer moves that don't box itself in, even when a greedy
+        # apple move would close off space.
+        flood_bonus = 0.0
         if alive and not done:
             hx, hy = game.snake[0]
-            escape_routes = _count_escape_routes(game, hx, hy, depth=2)
-            safety_weight = 0.02 * (1.0 + 0.5 * dynamics.progress)
-            safety_bonus = safety_weight * (escape_routes / 12.0)
+            open_cells = _full_flood_fill(game, hx, hy)
+            flood_fraction = open_cells / float(max(1, board_capacity))
+            flood_bonus = cfg.flood_fill_bonus_weight * flood_fraction
 
-        immediate_reward = food_reward + survival_reward + death_reward + safety_bonus
-        # Clip immediate reward for TD stability; terminal score bonus stays separate from this clip.
-        clipped_immediate_reward = float(np.clip(immediate_reward, -2.0, 2.0))
+        # Tail proximity bonus: reward keeping the tail reachable.
+        # The tail is the agent's escape hatch — if it can always reach its
+        # own tail via flood fill, it can never be permanently cornered.
+        # This teaches the "tail-chasing" strategy that strong Snake agents use.
+        tail_bonus = 0.0
+        if alive and not done and len(game.snake) > 1:
+            tx, ty = game.snake[-1]
+            if _full_flood_fill(game, tx, ty) > 0:
+                tail_bonus = cfg.tail_bonus_weight
+
+        immediate_reward = food_reward + survival_reward + death_reward + flood_bonus + tail_bonus
+
+        # Clip for TD stability. Terminal bonus is added after clip so a
+        # high-score terminal state isn't artificially capped.
+        clipped_immediate_reward = float(np.clip(immediate_reward, -3.0, 2.0))
 
         terminal_bonus = 0.0
         if done:
-            # Terminal performance bonus scales superlinearly with apples eaten.
             final_score = float(game.score)
-            terminal_bonus = dynamics.terminal_bonus_alpha * (max(0.0, final_score) ** cfg.terminal_bonus_power)
+            terminal_bonus = dynamics.terminal_bonus_alpha * (
+                max(0.0, final_score) ** cfg.terminal_bonus_power
+            )
         reward = clipped_immediate_reward + terminal_bonus
 
         food_reward_total += food_reward
         survival_reward_total += survival_reward
         death_reward_total += death_reward
-        safety_bonus_total += safety_bonus
+        safety_bonus_total += flood_bonus + tail_bonus   # reuse safety_bonus slot
         terminal_bonus_total += terminal_bonus
 
         if train:

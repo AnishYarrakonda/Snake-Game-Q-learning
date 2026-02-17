@@ -16,6 +16,7 @@ try:
         REVERSE_DIRECTION,
         EpisodeDynamics,
         STATE_ENCODING_INTEGER,
+        STATE_SIZE,
         SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
         normalize_hidden_layers,
@@ -26,6 +27,7 @@ except ImportError:
         REVERSE_DIRECTION,
         EpisodeDynamics,
         STATE_ENCODING_INTEGER,
+        STATE_SIZE,
         SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
         normalize_hidden_layers,
@@ -80,8 +82,16 @@ class SnakeDQNAgent:
             self.device = torch.device("cpu")
 
         hidden_layers = normalize_hidden_layers(cfg.hidden_layers)
-        self.policy_net = MLPQNetwork(16, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
-        self.target_net = MLPQNetwork(16, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
+        self.policy_net = MLPQNetwork(
+            STATE_SIZE,
+            hidden_layers=hidden_layers,
+            output_size=len(self.action_space),
+        ).to(self.device)
+        self.target_net = MLPQNetwork(
+            STATE_SIZE,
+            hidden_layers=hidden_layers,
+            output_size=len(self.action_space),
+        ).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -143,10 +153,10 @@ class SnakeDQNAgent:
         sample_size = min(len(self.memory), self.batch_size_current)
         batch = random.sample(self.memory, sample_size)
 
-        states_np = np.empty((sample_size, 16), dtype=np.float32)
+        states_np = np.empty((sample_size, STATE_SIZE), dtype=np.float32)
         actions_np = np.empty(sample_size, dtype=np.int64)
         rewards_np = np.empty(sample_size, dtype=np.float32)
-        next_states_np = np.empty((sample_size, 16), dtype=np.float32)
+        next_states_np = np.empty((sample_size, STATE_SIZE), dtype=np.float32)
         dones_np = np.empty(sample_size, dtype=np.float32)
         discounts_np = np.empty(sample_size, dtype=np.float32)
         next_directions: list[str] = []
@@ -256,6 +266,7 @@ class SnakeDQNAgent:
             "checkpoint_version": 1,
             "episode_index": int(episode_index),
             "board_size": self.cfg.board_size,
+            "state_size": STATE_SIZE,
             "state_encoding": self.cfg.state_encoding,
             "action_space_size": len(self.action_space),
             "hidden_layers": list(self.cfg.hidden_layers),
