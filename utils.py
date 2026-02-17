@@ -108,7 +108,7 @@ class TrainConfig:
     epsilon_decay: float = 0.994
     batch_size: int = 128
     memory_size: int = 50_000
-    replay_warmup: int = 1000
+    replay_warmup: int = 0
     hidden_layers: tuple[int, ...] = (256, 256, 128)
     target_update_every: int = 1
     soft_tau: float = 0.01

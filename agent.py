@@ -92,7 +92,8 @@ class SnakeDQNAgent:
         self.learn_steps = 0
         self.gamma = cfg.gamma
         self.batch_size_current = cfg.batch_size
-        self.replay_warmup = cfg.replay_warmup
+        # Keep training simple: no replay warmup phase.
+        self.replay_warmup = 0
         self.soft_tau = cfg.soft_tau
         self.best_score = 0.0
         self.loaded_legacy_payload = False
@@ -136,7 +137,7 @@ class SnakeDQNAgent:
             group["lr"] = dynamics.lr
 
     def train_step(self) -> dict[str, float] | None:
-        if len(self.memory) < self.replay_warmup:
+        if len(self.memory) == 0:
             return None
 
         sample_size = min(len(self.memory), self.batch_size_current)
@@ -288,7 +289,7 @@ class SnakeDQNAgent:
             replay_buffer = deque(maxlen=self.cfg.memory_size)
             self.memory = replay_buffer
             self.batch_size_current = self.cfg.batch_size
-            self.replay_warmup = self.cfg.replay_warmup
+            self.replay_warmup = 0
             self.soft_tau = self.cfg.soft_tau
             return 0, replay_buffer
 
@@ -342,7 +343,7 @@ class SnakeDQNAgent:
         for group in self.optimizer.param_groups:
             group["lr"] = restored_lr
         self.batch_size_current = int(agent_state.get("batch_size_current", self.cfg.batch_size))
-        self.replay_warmup = int(agent_state.get("replay_warmup", self.cfg.replay_warmup))
+        self.replay_warmup = 0
         self.soft_tau = float(agent_state.get("soft_tau", self.cfg.soft_tau))
         self.learn_steps = int(agent_state.get("learn_steps", 0))
         self.best_score = float(agent_state.get("best_score", 0.0))
