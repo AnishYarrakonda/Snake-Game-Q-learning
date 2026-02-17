@@ -27,7 +27,7 @@ MIN_HIDDEN_LAYERS = 1
 MAX_HIDDEN_LAYERS = 8
 MIN_NEURONS_PER_LAYER = 8
 MAX_NEURONS_PER_LAYER = 2048
-DEFAULT_HIDDEN_LAYERS = (128, 128, 64)
+DEFAULT_HIDDEN_LAYERS = (512, 384, 256, 128)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
@@ -107,37 +107,47 @@ class TrainConfig:
     batch_size: int = 128
     memory_size: int = 50_000
     replay_warmup: int = 0
-    hidden_layers: tuple[int, ...] = (256, 256, 128)
+    hidden_layers: tuple[int, ...] = (512, 384, 256, 128)
     target_update_every: int = 1
     soft_tau: float = 0.01
-    n_step: int = 5
+    n_step: int = 7
     step_delay: float = 0.0
     state_encoding: str = STATE_ENCODING_INTEGER
-    stall_limit_factor: int = 60
+    stall_limit_factor: int = 45
     lr_start: float = 1e-3
     lr_end: float = 2e-4
     gamma_start: float = 0.96
-    gamma_end: float = 0.99
-    epsilon_decay_rate: float = 8.0
+    gamma_end: float = 0.995
+    epsilon_decay_rate: float = 10.0
     epsilon_burst_chunk_size: int = 250
     epsilon_burst_odd_chunks_only: bool = True
     batch_size_start: int = 64
     batch_size_end: int = 128
     # --- reward shaping ---
-    food_reward_base: float = 1.0      # reduced from 1.5: less greedy
-    food_reward_min: float = 0.6       # floor as training progresses
-    survival_reward_start: float = 0.04
-    survival_reward_end: float = 0.15
-    death_reward: float = -2.0
+    food_reward_base: float = 1.0
+    food_reward_min: float = 0.35
+    survival_reward_start: float = 0.05
+    survival_reward_end: float = 0.30
+    death_reward: float = -2.8
     # flood fill positioning bonus — reward agent for keeping more open space
-    flood_fill_bonus_weight: float = 0.03
+    flood_fill_bonus_weight: float = 0.08
     # tail proximity bonus — reward agent for keeping escape route via tail
-    tail_bonus_weight: float = 0.01
+    tail_bonus_weight: float = 0.04
     # length penalty on death — dying longer is punished more
-    length_death_penalty_scale: float = 0.05
-    terminal_bonus_alpha_start: float = 0.05
-    terminal_bonus_alpha_end: float = 0.20
-    terminal_bonus_power: float = 1.5   # more superlinear: winning big matters a lot
+    length_death_penalty_scale: float = 0.08
+    terminal_bonus_alpha_start: float = 0.08
+    terminal_bonus_alpha_end: float = 0.35
+    terminal_bonus_power: float = 1.8
+    # Long-game reward mode.
+    survival_focus_length: int = 15
+    survival_focus_multiplier: float = 3.5
+    food_reward_late_scale: float = 0.40
+    # Positioning safety terms to avoid self-traps.
+    open_space_delta_weight: float = 0.60
+    dead_end_penalty_weight: float = 0.35
+    tail_unreachable_penalty: float = 0.12
+    stall_step_penalty: float = 0.04
+    food_progress_weight: float = 0.02
     q_explosion_threshold: float = 100.0
 
     def __post_init__(self) -> None:
@@ -158,6 +168,8 @@ class TrainConfig:
             raise ValueError("n_step must be > 0.")
         if self.epsilon_burst_chunk_size <= 0:
             raise ValueError("epsilon_burst_chunk_size must be > 0.")
+        if self.survival_focus_length < 3:
+            raise ValueError("survival_focus_length must be >= 3.")
 
 
 @dataclass(frozen=True)
@@ -475,8 +487,7 @@ def episode_progress(episode: int, total_episodes: int) -> float:
 def episode_dynamics(episode: int, cfg: TrainConfig) -> EpisodeDynamics:
     progress = episode_progress(episode, cfg.episodes)
 
-    # Gamma: ramps from 0.96 -> 0.99 over training.
-    # Higher gamma later means agent thinks further ahead.
+    # Gamma ramps up during training so late policy is more long-horizon.
     gamma = cfg.gamma_start + (cfg.gamma_end - cfg.gamma_start) * (progress**0.5)
 
     # Learning rate: decays from lr_start to 40% of lr_start
@@ -506,23 +517,19 @@ def episode_dynamics(episode: int, cfg: TrainConfig) -> EpisodeDynamics:
     batch_size = int(round(cfg.batch_size_start + (cfg.batch_size_end - cfg.batch_size_start) * (progress**2)))
     batch_size = max(cfg.batch_size_start, min(cfg.batch_size_end, batch_size))
 
-    # Food reward: decays faster than before. In late training the agent should
-    # stop being greedy about every apple and think about survivability first.
-    # Falls from food_reward_base to food_reward_min over training.
+    # Food reward decays over training to reduce short-sighted greed.
     food_reward = max(
         cfg.food_reward_min,
-        cfg.food_reward_base * (1.0 - 0.7 * progress),   # was 0.5 * progress
+        cfg.food_reward_base * (1.0 - 0.82 * progress),
     )
 
-    # Survival reward: grows with concave curve — reaches its ceiling faster
-    # so mid-game training already heavily rewards staying alive.
+    # Survival reward grows quickly so the policy prioritizes life-preserving
+    # trajectories once it can reliably collect early food.
     survival_reward = cfg.survival_reward_start + (
         cfg.survival_reward_end - cfg.survival_reward_start
-    ) * (progress**0.5)   # was 0.7, now 0.5 — faster ramp
+    ) * (progress**0.4)
 
-    # Terminal bonus alpha: very aggressive superlinear growth.
-    # The agent should learn that a high-length terminal state is
-    # exponentially more valuable than a medium one.
+    # Terminal bonus grows superlinearly; high-length endings dominate.
     terminal_bonus_alpha = cfg.terminal_bonus_alpha_start + (
         cfg.terminal_bonus_alpha_end - cfg.terminal_bonus_alpha_start
     ) * (progress**1.5)
@@ -696,6 +703,9 @@ def run_episode(
         if stop_flag and stop_flag.is_set():
             break
 
+        prev_hx, prev_hy = game.snake[0]
+        prev_open_fraction = _full_flood_fill(game, prev_hx, prev_hy) / float(max(1, board_capacity))
+        prev_food_distance = nearest_apple_distance(game)
         valid_actions = agent.valid_action_indices(game.direction)
         action_idx = agent.select_action(state, valid_actions, explore=train)
         action_to_direction = getattr(agent, "action_to_direction", None)
@@ -721,50 +731,84 @@ def run_episode(
         next_direction = game.direction
 
         # --- Reward shaping ---
-        # Philosophy: less food greed, more survival, spatial positioning bonuses.
+        # Two-phase behavior:
+        # 1) short snake: still learn food collection,
+        # 2) long snake (>= survival_focus_length): heavily prefer survivability.
+        in_survival_focus = new_length >= cfg.survival_focus_length
+        long_mode_scale = 1.0
+        if in_survival_focus:
+            long_mode_scale += (new_length - cfg.survival_focus_length) / float(max(1, cfg.board_size))
 
-        # Food: agent gets credit for eating, but reward decays with training
-        # to reduce the greedy apple-chasing that causes self-trapping.
-        food_reward = dynamics.food_reward if new_length > old_length else 0.0
+        food_reward = 0.0
+        if new_length > old_length:
+            food_scale = cfg.food_reward_late_scale if in_survival_focus else 1.0
+            food_reward = dynamics.food_reward * food_scale
 
-        # Survival: small per-step reward for staying alive.
-        survival_reward = dynamics.survival_reward if alive else 0.0
+        survival_reward = 0.0
+        if alive:
+            survival_mult = cfg.survival_focus_multiplier if in_survival_focus else 1.0
+            survival_reward = dynamics.survival_reward * survival_mult
 
-        # Death/stall: flat penalty plus a length-scaled component.
-        # Dying at length 50 should hurt far more than dying at length 5
-        # because the agent has wasted far more accumulated progress.
         death_reward = 0.0
         if not alive or stalled:
             length_penalty = cfg.length_death_penalty_scale * float(len(game.snake))
-            death_reward = dynamics.death_reward - length_penalty
+            survival_focus_penalty = 0.5 * max(0.0, long_mode_scale - 1.0)
+            death_reward = dynamics.death_reward - length_penalty - survival_focus_penalty
 
-        # Flood fill bonus: reward moves that preserve more open space.
-        # Computed as the flood fill of the new head position normalized by
-        # board capacity. High open space = good position. This teaches the
-        # agent to prefer moves that don't box itself in, even when a greedy
-        # apple move would close off space.
         flood_bonus = 0.0
+        open_space_delta_term = 0.0
+        dead_end_penalty = 0.0
+        tail_bonus = 0.0
+        tail_penalty = 0.0
+        food_progress_bonus = 0.0
+        stall_penalty = 0.0
         if alive and not done:
             hx, hy = game.snake[0]
             open_cells = _full_flood_fill(game, hx, hy)
             flood_fraction = open_cells / float(max(1, board_capacity))
             flood_bonus = cfg.flood_fill_bonus_weight * flood_fraction
 
-        # Tail proximity bonus: reward keeping the tail reachable.
-        # The tail is the agent's escape hatch — if it can always reach its
-        # own tail via flood fill, it can never be permanently cornered.
-        # This teaches the "tail-chasing" strategy that strong Snake agents use.
-        tail_bonus = 0.0
-        if alive and not done and len(game.snake) > 1:
-            tx, ty = game.snake[-1]
-            if _full_flood_fill(game, tx, ty) > 0:
-                tail_bonus = cfg.tail_bonus_weight
+            # Penalize moves that reduce reachable space and reward moves that open it.
+            open_space_delta = flood_fraction - prev_open_fraction
+            open_space_delta_term = cfg.open_space_delta_weight * open_space_delta
 
-        immediate_reward = food_reward + survival_reward + death_reward + flood_bonus + tail_bonus
+            collisions = _get_collision_info(game, hx, hy)
+            safe_exits = sum(0 if collisions[d] else 1 for d in ACTIONS)
+            if safe_exits <= 1:
+                dead_end_penalty = cfg.dead_end_penalty_weight * (2 - safe_exits) * long_mode_scale
 
-        # Clip for TD stability. Terminal bonus is added after clip so a
-        # high-score terminal state isn't artificially capped.
-        clipped_immediate_reward = float(np.clip(immediate_reward, -3.0, 2.0))
+            if len(game.snake) > 1:
+                tx, ty = game.snake[-1]
+                if _full_flood_fill(game, tx, ty) > 0:
+                    tail_bonus = cfg.tail_bonus_weight * (1.0 + 0.5 * max(0.0, long_mode_scale - 1.0))
+                else:
+                    tail_penalty = cfg.tail_unreachable_penalty * long_mode_scale
+
+            # Early/mid game guidance: mildly reward getting closer to food.
+            if not in_survival_focus and new_length == old_length:
+                new_food_distance = nearest_apple_distance(game)
+                food_progress_bonus = cfg.food_progress_weight * float(prev_food_distance - new_food_distance)
+
+            if new_length == old_length:
+                stall_budget = float(max(1, cfg.stall_limit_factor * max(1, len(game.snake))))
+                stall_ratio = min(1.0, stagnation_steps / stall_budget)
+                stall_penalty = cfg.stall_step_penalty * stall_ratio
+
+        immediate_reward = (
+            food_reward
+            + survival_reward
+            + death_reward
+            + flood_bonus
+            + open_space_delta_term
+            + tail_bonus
+            + food_progress_bonus
+            - dead_end_penalty
+            - tail_penalty
+            - stall_penalty
+        )
+
+        # Keep immediate rewards bounded for TD stability.
+        clipped_immediate_reward = float(np.clip(immediate_reward, -4.0, 3.0))
 
         terminal_bonus = 0.0
         if done:
@@ -777,7 +821,9 @@ def run_episode(
         food_reward_total += food_reward
         survival_reward_total += survival_reward
         death_reward_total += death_reward
-        safety_bonus_total += flood_bonus + tail_bonus   # reuse safety_bonus slot
+        safety_bonus_total += (
+            flood_bonus + open_space_delta_term + tail_bonus - dead_end_penalty - tail_penalty - stall_penalty
+        )
         terminal_bonus_total += terminal_bonus
 
         if train:

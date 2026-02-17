@@ -40,30 +40,39 @@ VALID_ACTIONS_BY_DIRECTION = {
 
 
 class MLPQNetwork(nn.Module):
-    """Feed-forward network for compact integer vector state."""
+    """Dueling MLP network for compact vector state."""
 
     def __init__(self, input_size: int, hidden_layers: tuple[int, ...], output_size: int = 4) -> None:
         super().__init__()
-        layers: list[nn.Module] = []
         if not hidden_layers:
             raise ValueError("hidden_layers cannot be empty.")
 
+        layers: list[nn.Module] = []
         in_features = input_size
-        first_width = hidden_layers[0]
-        layers.append(nn.Linear(in_features, first_width))
-        layers.append(nn.LayerNorm(first_width))
-        layers.append(nn.ReLU())
-        in_features = first_width
-
-        for width in hidden_layers[1:]:
+        for width in hidden_layers:
             layers.append(nn.Linear(in_features, width))
-            layers.append(nn.ReLU())
+            layers.append(nn.LayerNorm(width))
+            layers.append(nn.SiLU())
             in_features = width
-        layers.append(nn.Linear(in_features, output_size))
-        self.net = nn.Sequential(*layers)
+        self.trunk = nn.Sequential(*layers)
+
+        head_width = max(64, in_features // 2)
+        self.value_head = nn.Sequential(
+            nn.Linear(in_features, head_width),
+            nn.SiLU(),
+            nn.Linear(head_width, 1),
+        )
+        self.adv_head = nn.Sequential(
+            nn.Linear(in_features, head_width),
+            nn.SiLU(),
+            nn.Linear(head_width, output_size),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        features = self.trunk(x)
+        values = self.value_head(features)
+        advantages = self.adv_head(features)
+        return values + advantages - advantages.mean(dim=1, keepdim=True)
 
 
 class SnakeDQNAgent:
@@ -114,8 +123,19 @@ class SnakeDQNAgent:
     def action_to_direction(self, current_direction: str, action_idx: int) -> str:
         return ACTIONS[action_idx]
 
+    @staticmethod
+    def _safe_action_indices_from_state(state: np.ndarray, valid_indices: list[int]) -> list[int]:
+        # State[0:4] encodes immediate danger for [up, down, left, right].
+        if state.shape[0] < 4:
+            return valid_indices
+        safe = [idx for idx in valid_indices if float(state[idx]) < 0.5]
+        return safe if safe else valid_indices
+
     def select_action(self, state: np.ndarray, valid_indices: list[int], explore: bool = True) -> int:
         if explore and random.random() < self.epsilon:
+            safe_indices = self._safe_action_indices_from_state(state, valid_indices)
+            if safe_indices and random.random() < 0.9:
+                return random.choice(safe_indices)
             return random.choice(valid_indices)
 
         state_t = torch.from_numpy(state).to(device=self.device, dtype=torch.float32).unsqueeze(0)
@@ -185,7 +205,9 @@ class SnakeDQNAgent:
             masked_next_policy_q = torch.full_like(next_policy_q, -1e9)
             for idx, direction in enumerate(next_directions):
                 valid_indices = VALID_ACTIONS_BY_DIRECTION[direction]
-                masked_next_policy_q[idx, valid_indices] = next_policy_q[idx, valid_indices]
+                safe_indices = [action for action in valid_indices if next_states_np[idx, action] < 0.5]
+                allowed_indices = safe_indices if safe_indices else valid_indices
+                masked_next_policy_q[idx, allowed_indices] = next_policy_q[idx, allowed_indices]
             next_actions = masked_next_policy_q.argmax(dim=1, keepdim=True)
             next_q = self.target_net(next_states_t).gather(1, next_actions).squeeze(1)
 

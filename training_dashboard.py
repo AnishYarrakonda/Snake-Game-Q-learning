@@ -896,20 +896,28 @@ class TrainingDashboard:
         self.status_var.set("Stopping...")
 
     def save_model(self) -> None:
-        default_name = os.path.basename(default_model_path(self.cfg.board_size, self.cfg.state_encoding))
+        default_name = os.path.basename(default_model_path(self.cfg.board_size, self.cfg.state_encoding)).replace(".pt", ".ckpt")
         path = filedialog.asksaveasfilename(
             title="Save model",
             initialdir=MODELS_DIR,
             initialfile=default_name,
-            defaultextension=".pt",
-            filetypes=[("PyTorch model", "*.pt"), ("All files", "*.*")],
+            defaultextension=".ckpt",
+            filetypes=[
+                ("Training checkpoint", "*.ckpt"),
+                ("PyTorch weights model", "*.pt"),
+                ("All files", "*.*"),
+            ],
         )
         if not path:
             return
 
         try:
-            self.agent.save(path)
-            self.status_var.set(f"Saved model: {path}")
+            if path.lower().endswith(".ckpt"):
+                self.agent.save_checkpoint(path, episode_index=0, replay_buffer=self.agent.memory)
+                self.status_var.set(f"Saved checkpoint: {path}")
+            else:
+                self.agent.save(path)
+                self.status_var.set(f"Saved weights model: {path}")
         except Exception as exc:
             messagebox.showerror("Save Failed", str(exc))
 
@@ -1019,7 +1027,12 @@ class TrainingDashboard:
         path = filedialog.askopenfilename(
             title="Load model",
             initialdir=MODELS_DIR,
-            filetypes=[("PyTorch model", "*.pt"), ("All files", "*.*")],
+            filetypes=[
+                ("Model or checkpoint", "*.pt *.ckpt"),
+                ("Training checkpoint", "*.ckpt"),
+                ("PyTorch weights model", "*.pt"),
+                ("All files", "*.*"),
+            ],
         )
         if not path:
             return
@@ -1049,9 +1062,13 @@ class TrainingDashboard:
 
             cfg = self._read_cfg_from_ui()
             self._sync_agent_to_cfg(cfg)
-            self.agent.load(path)
+            if path.lower().endswith(".ckpt"):
+                loaded_episode, _ = self.agent.load_checkpoint(path)
+                self.status_var.set(f"Loaded checkpoint: {path} (episode {loaded_episode})")
+            else:
+                self.agent.load(path)
+                self.status_var.set(f"Loaded model: {path}")
 
-            self.status_var.set(f"Loaded model: {path}")
         except Exception as exc:
             messagebox.showerror("Load Failed", str(exc))
 
