@@ -80,8 +80,8 @@ class SnakeDQNAgent:
             self.device = torch.device("cpu")
 
         hidden_layers = normalize_hidden_layers(cfg.hidden_layers)
-        self.policy_net = MLPQNetwork(12, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
-        self.target_net = MLPQNetwork(12, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
+        self.policy_net = MLPQNetwork(16, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
+        self.target_net = MLPQNetwork(16, hidden_layers=hidden_layers, output_size=len(self.action_space)).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
@@ -141,14 +141,30 @@ class SnakeDQNAgent:
 
         sample_size = min(len(self.memory), self.batch_size_current)
         batch = random.sample(self.memory, sample_size)
-        states, actions, rewards, next_states, next_directions, dones, discounts = zip(*batch)
 
-        states_t = torch.from_numpy(np.stack(states).astype(np.float32, copy=False)).to(self.device)
-        actions_t = torch.from_numpy(np.fromiter(actions, dtype=np.int64, count=sample_size)).to(self.device)
-        rewards_t = torch.from_numpy(np.fromiter(rewards, dtype=np.float32, count=sample_size)).to(self.device)
-        next_states_t = torch.from_numpy(np.stack(next_states).astype(np.float32, copy=False)).to(self.device)
-        dones_t = torch.from_numpy(np.fromiter(dones, dtype=np.float32, count=sample_size)).to(self.device)
-        discounts_t = torch.from_numpy(np.fromiter(discounts, dtype=np.float32, count=sample_size)).to(self.device)
+        states_np = np.empty((sample_size, 16), dtype=np.float32)
+        actions_np = np.empty(sample_size, dtype=np.int64)
+        rewards_np = np.empty(sample_size, dtype=np.float32)
+        next_states_np = np.empty((sample_size, 16), dtype=np.float32)
+        dones_np = np.empty(sample_size, dtype=np.float32)
+        discounts_np = np.empty(sample_size, dtype=np.float32)
+        next_directions: list[str] = []
+
+        for i, (state, action, reward, next_state, next_dir, done, discount) in enumerate(batch):
+            states_np[i] = state
+            actions_np[i] = action
+            rewards_np[i] = reward
+            next_states_np[i] = next_state
+            dones_np[i] = done
+            discounts_np[i] = discount
+            next_directions.append(next_dir)
+
+        states_t = torch.from_numpy(states_np).to(self.device)
+        actions_t = torch.from_numpy(actions_np).to(self.device)
+        rewards_t = torch.from_numpy(rewards_np).to(self.device)
+        next_states_t = torch.from_numpy(next_states_np).to(self.device)
+        dones_t = torch.from_numpy(dones_np).to(self.device)
+        discounts_t = torch.from_numpy(discounts_np).to(self.device)
 
         current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
