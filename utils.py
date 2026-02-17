@@ -100,7 +100,7 @@ class TrainConfig:
     board_size: int = 10
     apples: int = 5
     episodes: int = 10000
-    max_steps: int = 250
+    max_steps: int = 2000
     gamma: float = 0.96
     lr: float = 0.001
     epsilon_start: float = 1.0
