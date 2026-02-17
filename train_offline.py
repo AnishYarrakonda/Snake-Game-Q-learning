@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import threading
 from typing import Callable
@@ -89,10 +90,29 @@ def _update_progress_plots(ax_trend: plt.Axes, ax_hist: plt.Axes, scores: list[f
             ax_hist.legend(loc="upper right")
 
 
+def _default_checkpoint_path(cfg: TrainConfig) -> str:
+    base_model = default_model_path(cfg.board_size, cfg.state_encoding)
+    root, _ = os.path.splitext(base_model)
+    return f"{root}.ckpt"
+
+
+def _periodic_checkpoint_path(base_path: str, episode: int) -> str:
+    root, ext = os.path.splitext(base_path)
+    if not ext:
+        ext = ".ckpt"
+    # If base already ends with an episode suffix, replace it.
+    root = re.sub(r"([_-](?:ep)?\d+)$", "", root, flags=re.IGNORECASE)
+    return f"{root}_{episode}{ext}"
+
+
 def train_offline(
     cfg: TrainConfig,
     load_path: str | None = None,
     save_path: str | None = None,
+    resume_path: str | None = None,
+    save_weights_path: str | None = None,
+    save_checkpoint_every: int = 0,
+    checkpoint_base_path: str | None = None,
     show_plot: bool = True,
     print_every: int = 25,
     show_final_trend_plot: bool = True,
@@ -101,8 +121,36 @@ def train_offline(
 ) -> tuple[SnakeDQNAgent, list[float], list[float]]:
     """Train agent without Tkinter; optionally show a live matplotlib chart."""
     agent = SnakeDQNAgent(cfg)
+    start_episode = 1
+
+    if load_path and resume_path:
+        raise ValueError("Use only one of load_path (weights-only) or resume_path (full checkpoint).")
+
+    if resume_path:
+        loaded_episode, _ = agent.load_checkpoint(resume_path)
+        if agent.loaded_legacy_payload:
+            print(
+                "Loaded legacy weights-only payload from resume path; optimizer/replay/episode state unavailable. "
+                "Starting a fresh training run from episode 1."
+            )
+            print(f"Resuming training from episode 0, epsilon={agent.epsilon:.6f}, best_score={agent.best_score:.0f}")
+            start_episode = 1
+        else:
+            start_episode = loaded_episode + 1
+            print(
+                f"Resuming training from episode {loaded_episode}, "
+                f"epsilon={agent.epsilon:.6f}, best_score={agent.best_score:.0f}"
+            )
+
     if load_path:
         agent.load(load_path)
+        start_episode = 1
+
+    if start_episode > cfg.episodes:
+        print(
+            f"Checkpoint already at episode {start_episode - 1}, "
+            f"which is >= configured total episodes ({cfg.episodes}). No new episodes to run."
+        )
 
     scores: list[float] = []
     avg10_scores: list[float] = []
@@ -122,6 +170,10 @@ def train_offline(
     chunk_episode_ends: list[int] = []
     chunk_avg_scores: list[float] = []
     chunk_median_scores: list[float] = []
+    checkpoint_every = max(0, int(save_checkpoint_every))
+    checkpoint_seed_path = checkpoint_base_path or save_path or resume_path or _default_checkpoint_path(cfg)
+    last_completed_episode = start_episode - 1
+    last_periodic_checkpoint_path: str | None = None
 
     print(f"\nUsing device: {agent.device}\n")
 
@@ -154,7 +206,7 @@ def train_offline(
 
     episode_game = make_game(cfg)
 
-    for episode in range(1, cfg.episodes + 1):
+    for episode in range(start_episode, cfg.episodes + 1):
         if stop_flag and stop_flag.is_set():
             break
 
@@ -181,11 +233,13 @@ def train_offline(
         recent_q_explodes.append(int(abs(float(episode_stats["max_abs_q"])) > cfg.q_explosion_threshold))
         avg10 = float(np.mean(recent_10))
         avg10_scores.append(avg10)
+        agent.best_score = max(agent.best_score, float(score))
+        last_completed_episode = episode
 
         if episode_callback:
             episode_callback(episode, float(score), avg10, float(agent.epsilon))
 
-        if show_plot and (episode == 1 or episode % 10 == 0 or episode == cfg.episodes):
+        if show_plot and (episode == start_episode or episode % 10 == 0 or episode == cfg.episodes):
             _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
             fig.canvas.draw_idle() #type: ignore
             fig.canvas.flush_events() #type: ignore
@@ -233,8 +287,24 @@ def train_offline(
             print(row)
             print()
 
+        if checkpoint_every > 0 and (episode % checkpoint_every == 0):
+            periodic_path = _periodic_checkpoint_path(checkpoint_seed_path, episode)
+            agent.save_checkpoint(periodic_path, episode_index=episode, replay_buffer=agent.memory)
+            last_periodic_checkpoint_path = periodic_path
+            print(f"Saved checkpoint: {periodic_path}")
+
     if save_path:
-        agent.save(save_path)
+        if (
+            last_periodic_checkpoint_path
+            and os.path.abspath(last_periodic_checkpoint_path) == os.path.abspath(save_path)
+        ):
+            print(f"Final checkpoint already saved at: {save_path}")
+        else:
+            agent.save_checkpoint(save_path, episode_index=last_completed_episode, replay_buffer=agent.memory)
+            print(f"Saved checkpoint: {save_path}")
+    if save_weights_path:
+        agent.save(save_weights_path)
+        print(f"Saved weights-only model: {save_weights_path}")
 
     if show_plot:
         _update_progress_plots(ax_trend, ax_hist, scores) #type: ignore
@@ -277,6 +347,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Offline Snake DQN training")
     parser.add_argument("--board-size", type=int, default=defaults.board_size, choices=BOARD_SIZES)
     parser.add_argument("--apples", type=int, default=defaults.apples, choices=APPLE_CHOICES)
+    parser.add_argument("--episodes", type=int, default=defaults.episodes)
     parser.add_argument(
         "--hidden-layers",
         type=int,
@@ -289,8 +360,36 @@ def parse_args() -> argparse.Namespace:
         default=default_hidden_neurons,
         help="Neurons per layer: one integer for all layers, or comma-separated widths matching --hidden-layers.",
     )
-    parser.add_argument("--load", type=str, default="")
-    parser.add_argument("--save", type=str, default="")
+    parser.add_argument(
+        "--load",
+        type=str,
+        default="",
+        help="Load weights-only model and start a fresh run (no replay/optimizer/episode resume).",
+    )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default="",
+        help="Resume from full checkpoint and continue training with optimizer/replay/schedules intact.",
+    )
+    parser.add_argument(
+        "--save",
+        type=str,
+        default="",
+        help="Save full checkpoint at the end of training.",
+    )
+    parser.add_argument(
+        "--save-weights",
+        type=str,
+        default="",
+        help="Optional weights-only save path (.pt).",
+    )
+    parser.add_argument(
+        "--save-checkpoint-every",
+        type=int,
+        default=0,
+        help="If > 0, save a full checkpoint every N episodes.",
+    )
     parser.add_argument(
         "--print-every",
         type=int,
@@ -438,19 +537,19 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
 
 def _prompt_save_after_training(agent: SnakeDQNAgent, cfg: TrainConfig) -> None:
     while True:
-        choice = input("\nSave model now? (y/n): ").strip().lower()
+        choice = input("\nSave checkpoint now? (y/n): ").strip().lower()
         if choice in {"y", "yes"}:
-            default_path = default_model_path(cfg.board_size, cfg.state_encoding)
+            default_path = _default_checkpoint_path(cfg)
             raw = input(f"Save path [{default_path}]: ").strip()
             path = default_path if raw == "" else raw
             try:
-                agent.save(path)
-                print(f"Saved model to: {path}")
+                agent.save_checkpoint(path, episode_index=cfg.episodes, replay_buffer=agent.memory)
+                print(f"Saved checkpoint to: {path}")
             except Exception as exc:
                 print(f"Save failed: {exc}")
             return
         if choice in {"n", "no", ""}:
-            print("Model not saved.")
+            print("Checkpoint not saved.")
             return
         print("Enter y or n.")
 
@@ -458,22 +557,50 @@ def _prompt_save_after_training(agent: SnakeDQNAgent, cfg: TrainConfig) -> None:
 def run_offline_training_cli() -> None:
     args = parse_args()
     interactive = args.interactive or len(sys.argv) == 1
+    if args.resume and args.load:
+        raise SystemExit("Use only one of --resume or --load.")
+    if args.save_checkpoint_every < 0:
+        raise SystemExit("--save-checkpoint-every must be >= 0.")
+
     if interactive:
         cfg, load_path, show_plot, print_every, show_final_trend_plot = prompt_train_config()
+        resume_path = None
         save_path = None
+        save_weights_path = None
+        save_checkpoint_every = 0
+        checkpoint_base_path = None
     else:
-        try:
-            hidden_layers = parse_hidden_layer_widths(args.hidden_layers, args.neurons)
-        except ValueError as exc:
-            raise SystemExit(f"Invalid hidden layer settings: {exc}")
-        cfg = TrainConfig(
-            board_size=args.board_size,
-            apples=args.apples,
-            hidden_layers=hidden_layers,
-            state_encoding=STATE_ENCODING_INTEGER,
-        )
+        resume_path = args.resume if args.resume else None
+        if resume_path:
+            metadata = SnakeDQNAgent.load_metadata(resume_path)
+            cfg_data = metadata.get("cfg", {})
+            hidden_layers_raw = metadata.get("hidden_layers", TrainConfig().hidden_layers)
+            hidden_layers = tuple(int(width) for width in hidden_layers_raw)
+            cfg = TrainConfig(
+                board_size=int(metadata.get("board_size", args.board_size)),
+                apples=int(cfg_data.get("apples", args.apples)),
+                episodes=args.episodes,
+                hidden_layers=hidden_layers,
+                state_encoding=STATE_ENCODING_INTEGER,
+            )
+        else:
+            try:
+                hidden_layers = parse_hidden_layer_widths(args.hidden_layers, args.neurons)
+            except ValueError as exc:
+                raise SystemExit(f"Invalid hidden layer settings: {exc}")
+            cfg = TrainConfig(
+                board_size=args.board_size,
+                apples=args.apples,
+                episodes=args.episodes,
+                hidden_layers=hidden_layers,
+                state_encoding=STATE_ENCODING_INTEGER,
+            )
+
         load_path = args.load if args.load else None
         save_path = args.save if args.save else None
+        save_weights_path = args.save_weights if args.save_weights else None
+        save_checkpoint_every = int(args.save_checkpoint_every)
+        checkpoint_base_path = save_path or resume_path or _default_checkpoint_path(cfg)
         show_plot = not args.no_plot
         print_every = args.print_every
         show_final_trend_plot = not args.no_final_trend_plot
@@ -482,6 +609,10 @@ def run_offline_training_cli() -> None:
         cfg,
         load_path=load_path,
         save_path=save_path,
+        resume_path=resume_path,
+        save_weights_path=save_weights_path,
+        save_checkpoint_every=save_checkpoint_every,
+        checkpoint_base_path=checkpoint_base_path,
         show_plot=show_plot,
         print_every=print_every,
         show_final_trend_plot=show_final_trend_plot,

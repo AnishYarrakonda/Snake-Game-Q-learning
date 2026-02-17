@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 import random
+from typing import Any
 
 import numpy as np
 import torch
@@ -93,6 +94,8 @@ class SnakeDQNAgent:
         self.batch_size_current = cfg.batch_size
         self.replay_warmup = cfg.replay_warmup
         self.soft_tau = cfg.soft_tau
+        self.best_score = 0.0
+        self.loaded_legacy_payload = False
 
     def valid_action_indices(self, current_direction: str) -> list[int]:
         return VALID_ACTIONS_BY_DIRECTION[current_direction]
@@ -188,7 +191,153 @@ class SnakeDQNAgent:
     def decay_epsilon(self) -> None:
         self.epsilon = max(self.cfg.epsilon_min, self.epsilon * self.cfg.epsilon_decay)
 
+    @staticmethod
+    def _torch_load(path: str, map_location: Any) -> dict:
+        try:
+            return torch.load(path, map_location=map_location, weights_only=False)
+        except TypeError:
+            return torch.load(path, map_location=map_location)
+
+    @staticmethod
+    def _capture_rng_state() -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "python_random": random.getstate(),
+            "numpy_random": np.random.get_state(),
+            "torch_cpu": torch.random.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            state["torch_cuda"] = torch.cuda.get_rng_state_all()
+        return state
+
+    @staticmethod
+    def _restore_rng_state(state: dict[str, Any]) -> None:
+        if not state:
+            return
+        python_state = state.get("python_random")
+        numpy_state = state.get("numpy_random")
+        torch_cpu_state = state.get("torch_cpu")
+        torch_cuda_state = state.get("torch_cuda")
+        if python_state is not None:
+            random.setstate(python_state)
+        if numpy_state is not None:
+            np.random.set_state(numpy_state)
+        if torch_cpu_state is not None:
+            torch.random.set_rng_state(torch_cpu_state)
+        if torch_cuda_state is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(torch_cuda_state)
+
+    def _move_optimizer_state_to_device(self) -> None:
+        for state in self.optimizer.state.values():
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    state[key] = value.to(self.device)
+
+    def save_checkpoint(self, path: str, episode_index: int, replay_buffer) -> None:
+        """Save full training state to allow exact resume."""
+        replay_items = list(replay_buffer)
+        payload = {
+            "checkpoint_version": 1,
+            "episode_index": int(episode_index),
+            "board_size": self.cfg.board_size,
+            "state_encoding": self.cfg.state_encoding,
+            "action_space_size": len(self.action_space),
+            "hidden_layers": list(self.cfg.hidden_layers),
+            "policy_state_dict": self.policy_net.state_dict(),
+            "target_state_dict": self.target_net.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "replay_buffer": replay_items,
+            "replay_buffer_maxlen": getattr(replay_buffer, "maxlen", self.cfg.memory_size) or self.cfg.memory_size,
+            "agent_state": {
+                "epsilon": float(self.epsilon),
+                "gamma": float(self.gamma),
+                "lr": float(self.optimizer.param_groups[0]["lr"]),
+                "batch_size_current": int(self.batch_size_current),
+                "replay_warmup": int(self.replay_warmup),
+                "soft_tau": float(self.soft_tau),
+                "learn_steps": int(self.learn_steps),
+                "best_score": float(self.best_score),
+            },
+            "rng_state": self._capture_rng_state(),
+            "cfg": vars(self.cfg),
+        }
+        torch.save(payload, path)
+
+    def load_checkpoint(self, path: str) -> tuple[int, deque]:
+        """Load full training state and return (episode_index, replay_buffer)."""
+        payload = self._torch_load(path, map_location=self.device)
+        # Backward compatibility: old saves only had model weights and metadata.
+        if "policy_state_dict" not in payload or "optimizer_state_dict" not in payload:
+            self.load(path)
+            self.loaded_legacy_payload = True
+            replay_buffer = deque(maxlen=self.cfg.memory_size)
+            self.memory = replay_buffer
+            self.batch_size_current = self.cfg.batch_size
+            self.replay_warmup = self.cfg.replay_warmup
+            self.soft_tau = self.cfg.soft_tau
+            return 0, replay_buffer
+
+        if "target_state_dict" not in payload:
+            raise ValueError("Checkpoint is missing target_state_dict.")
+
+        board_size = int(payload.get("board_size", self.cfg.board_size))
+        if board_size != self.cfg.board_size:
+            raise ValueError(
+                f"Checkpoint board size ({board_size}) does not match current board size ({self.cfg.board_size})."
+            )
+        payload_state_encoding = str(
+            payload.get("state_encoding", payload.get("cfg", {}).get("state_encoding", STATE_ENCODING_INTEGER))
+        )
+        if payload_state_encoding == "compact11":
+            payload_state_encoding = STATE_ENCODING_INTEGER
+        if payload_state_encoding != self.cfg.state_encoding:
+            raise ValueError(
+                f"Checkpoint state encoding ({payload_state_encoding}) does not match current state encoding "
+                f"({self.cfg.state_encoding})."
+            )
+        payload_action_space_size = int(payload.get("action_space_size", len(ACTIONS)))
+        if payload_action_space_size != len(self.action_space):
+            raise ValueError(
+                f"Checkpoint action space ({payload_action_space_size}) does not match current action space "
+                f"({len(self.action_space)})."
+            )
+        payload_hidden_layers = self._hidden_layers_from_payload(payload, self.cfg.hidden_layers)
+        if payload_hidden_layers != self.cfg.hidden_layers:
+            raise ValueError(
+                f"Checkpoint hidden layers {payload_hidden_layers} do not match current hidden layers "
+                f"{self.cfg.hidden_layers}."
+            )
+
+        self.policy_net.load_state_dict(payload["policy_state_dict"])
+        self.target_net.load_state_dict(payload["target_state_dict"])
+        self.target_net.eval()
+
+        self.optimizer.load_state_dict(payload["optimizer_state_dict"])
+        self._move_optimizer_state_to_device()
+
+        replay_items = payload.get("replay_buffer", [])
+        replay_maxlen = int(payload.get("replay_buffer_maxlen", self.cfg.memory_size))
+        replay_buffer = deque(replay_items, maxlen=replay_maxlen)
+        self.memory = replay_buffer
+
+        agent_state = payload.get("agent_state", {})
+        self.epsilon = float(agent_state.get("epsilon", self.cfg.epsilon_start))
+        self.gamma = float(agent_state.get("gamma", self.cfg.gamma))
+        restored_lr = float(agent_state.get("lr", self.cfg.lr))
+        for group in self.optimizer.param_groups:
+            group["lr"] = restored_lr
+        self.batch_size_current = int(agent_state.get("batch_size_current", self.cfg.batch_size))
+        self.replay_warmup = int(agent_state.get("replay_warmup", self.cfg.replay_warmup))
+        self.soft_tau = float(agent_state.get("soft_tau", self.cfg.soft_tau))
+        self.learn_steps = int(agent_state.get("learn_steps", 0))
+        self.best_score = float(agent_state.get("best_score", 0.0))
+
+        self._restore_rng_state(payload.get("rng_state", {}))
+        self.loaded_legacy_payload = False
+        loaded_episode = int(payload.get("episode_index", 0))
+        return loaded_episode, replay_buffer
+
     def save(self, path: str) -> None:
+        """Save weights-only model payload (not a resumable training checkpoint)."""
         payload = {
             "board_size": self.cfg.board_size,
             "state_encoding": self.cfg.state_encoding,
@@ -219,7 +368,8 @@ class SnakeDQNAgent:
         return normalize_hidden_layers(raw_layers)
 
     def load(self, path: str) -> None:
-        payload = torch.load(path, map_location=self.device)
+        """Load weights-only model payload."""
+        payload = self._torch_load(path, map_location=self.device)
         board_size = int(payload.get("board_size", self.cfg.board_size))
         if board_size != self.cfg.board_size:
             raise ValueError(
@@ -247,15 +397,24 @@ class SnakeDQNAgent:
                 f"Model hidden layers {payload_hidden_layers} do not match current hidden layers {self.cfg.hidden_layers}."
             )
 
-        self.policy_net.load_state_dict(payload["state_dict"])
-        self.target_net.load_state_dict(self.policy_net.state_dict())
+        state_dict = payload.get("state_dict", payload.get("policy_state_dict"))
+        if state_dict is None:
+            raise ValueError("Model payload does not contain state_dict or policy_state_dict.")
+        self.policy_net.load_state_dict(state_dict)
+        if "target_state_dict" in payload:
+            self.target_net.load_state_dict(payload["target_state_dict"])
+        else:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
         self.epsilon = float(payload.get("epsilon", self.cfg.epsilon_start))
         self.learn_steps = int(payload.get("learn_steps", 0))
+        if "agent_state" in payload:
+            self.best_score = float(payload["agent_state"].get("best_score", self.best_score))
 
     @staticmethod
     def load_metadata(path: str) -> dict:
         """Read model metadata without constructing networks first."""
-        payload = torch.load(path, map_location="cpu")
+        payload = SnakeDQNAgent._torch_load(path, map_location="cpu")
         cfg_data = payload.get("cfg", {})
         payload_state_encoding = str(payload.get("state_encoding", cfg_data.get("state_encoding", STATE_ENCODING_INTEGER)))
         if payload_state_encoding == "compact11":
