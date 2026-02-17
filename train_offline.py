@@ -186,6 +186,8 @@ def train_offline(
     chunk_avg_scores: list[float] = []
     chunk_median_scores: list[float] = []
     checkpoint_every = max(0, int(save_checkpoint_every))
+    if checkpoint_every == 0:
+        checkpoint_every = max(1, int(cfg.episodes * 0.10))
     checkpoint_seed_path = checkpoint_base_path or save_path or resume_path or _default_checkpoint_path(cfg)
     last_completed_episode = start_episode - 1
     last_periodic_checkpoint_path: str | None = None
@@ -194,6 +196,7 @@ def train_offline(
     early_stop_triggered = False
 
     print(f"\nUsing device: {agent.device}\n")
+    print(f"Checkpoint cadence: every {checkpoint_every} episodes")
 
     header = (
         f"{'Episodes':<18}"
@@ -391,6 +394,7 @@ def train_offline(
 
     if early_stop_triggered:
         print(f"Training stopped early at episode {last_completed_episode}/{cfg.episodes}")
+    setattr(agent, "last_completed_episode", int(last_completed_episode))
 
     return agent, scores, avg10_scores
 
@@ -445,7 +449,7 @@ def parse_args() -> argparse.Namespace:
         "--save-checkpoint-every",
         type=int,
         default=0,
-        help="If > 0, save a full checkpoint every N episodes.",
+        help="If > 0, save a full checkpoint every N episodes; if 0, auto-uses 10% of total episodes.",
     )
     parser.add_argument(
         "--print-every",
@@ -588,6 +592,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
 
     board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
+    episodes = _prompt_int("Episodes", default_cfg.episodes, min_value=1)
     hidden_layers = _prompt_hidden_layers(default_cfg.hidden_layers)
     epsilon_start = _prompt_float("Epsilon start", default_cfg.epsilon_start, min_value=0.0, max_value=1.0)
     epsilon_min = _prompt_float("Epsilon min", default_cfg.epsilon_min, min_value=0.0, max_value=1.0)
@@ -603,6 +608,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
     cfg = TrainConfig(
         board_size=board_size,
         apples=apples,
+        episodes=episodes,
         hidden_layers=hidden_layers,
         epsilon_start=epsilon_start,
         epsilon_min=epsilon_min,
@@ -614,22 +620,29 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
 
 
 def _prompt_save_after_training(agent: SnakeDQNAgent, cfg: TrainConfig) -> None:
-    while True:
-        choice = input("\nSave checkpoint now? (y/n): ").strip().lower()
-        if choice in {"y", "yes"}:
-            default_path = _default_checkpoint_path(cfg)
-            raw = input(f"Save path [{default_path}]: ").strip()
-            path = default_path if raw == "" else raw
-            try:
-                agent.save_checkpoint(path, episode_index=cfg.episodes, replay_buffer=agent.memory)
-                print(f"Saved checkpoint to: {path}")
-            except Exception as exc:
-                print(f"Save failed: {exc}")
-            return
-        if choice in {"n", "no", ""}:
-            print("Checkpoint not saved.")
-            return
-        print("Enter y or n.")
+    last_episode = int(getattr(agent, "last_completed_episode", cfg.episodes))
+    default_path = _default_checkpoint_path(cfg)
+    raw = input(
+        f"\nSave final checkpoint to [{default_path}] (press Enter for default, type 'skip' to skip): "
+    ).strip()
+    raw_l = raw.lower()
+    if raw_l not in {"skip", "s"}:
+        final_path = default_path if raw == "" else raw
+        try:
+            agent.save_checkpoint(final_path, episode_index=last_episode, replay_buffer=agent.memory)
+            print(f"Saved final checkpoint to: {final_path}")
+        except Exception as exc:
+            print(f"Final save failed: {exc}")
+    else:
+        print("Skipped final checkpoint save.")
+
+    extra = input("Save checkpoint 1 to (leave blank if you don't want to save it): ").strip()
+    if extra:
+        try:
+            agent.save_checkpoint(extra, episode_index=last_episode, replay_buffer=agent.memory)
+            print(f"Saved checkpoint 1 to: {extra}")
+        except Exception as exc:
+            print(f"Checkpoint 1 save failed: {exc}")
 
 
 def run_offline_training_cli() -> None:
@@ -653,7 +666,7 @@ def run_offline_training_cli() -> None:
         resume_path = None
         save_path = None
         save_weights_path = None
-        save_checkpoint_every = 0
+        save_checkpoint_every = max(1, int(cfg.episodes * 0.10))
         checkpoint_base_path = None
     else:
         resume_path = args.resume if args.resume else None

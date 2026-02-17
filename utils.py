@@ -119,6 +119,8 @@ class TrainConfig:
     gamma_start: float = 0.96
     gamma_end: float = 0.99
     epsilon_decay_rate: float = 8.0
+    epsilon_burst_chunk_size: int = 250
+    epsilon_burst_odd_chunks_only: bool = True
     batch_size_start: int = 64
     batch_size_end: int = 128
     # --- reward shaping ---
@@ -154,6 +156,8 @@ class TrainConfig:
             raise ValueError("replay_warmup must be >= 0.")
         if self.n_step <= 0:
             raise ValueError("n_step must be > 0.")
+        if self.epsilon_burst_chunk_size <= 0:
+            raise ValueError("epsilon_burst_chunk_size must be > 0.")
 
 
 @dataclass(frozen=True)
@@ -478,16 +482,25 @@ def episode_dynamics(episode: int, cfg: TrainConfig) -> EpisodeDynamics:
     # Learning rate: decays from lr_start to 40% of lr_start
     lr = cfg.lr_start * (1.0 - 0.6 * progress)
 
-    # Epsilon: fast decay in first half, plateau in second half.
-    # Keeps some exploration during late-game where the agent needs to
-    # discover non-greedy strategies it would never try greedily.
-    if progress < 0.5:
-        epsilon = max(cfg.epsilon_min, cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * progress))
-    else:
+    # Epsilon: base schedule + optional burst mode.
+    # In burst mode, odd chunks use the scheduled decay; even chunks force
+    # epsilon_min so the agent "practices" with near-greedy behavior.
+    def _scheduled_epsilon(ep: int) -> float:
+        ep_progress = episode_progress(ep, cfg.episodes)
+        if ep_progress < 0.5:
+            return max(cfg.epsilon_min, cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * ep_progress))
         mid_epsilon = cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * 0.5)
-        # Slow continued decay in second half rather than rushing to minimum
         remaining = mid_epsilon - cfg.epsilon_min
-        epsilon = max(cfg.epsilon_min, mid_epsilon - remaining * (progress - 0.5))
+        return max(cfg.epsilon_min, mid_epsilon - remaining * (ep_progress - 0.5))
+
+    epsilon = _scheduled_epsilon(episode)
+    if cfg.epsilon_burst_odd_chunks_only:
+        chunk_size = max(1, cfg.epsilon_burst_chunk_size)
+        chunk_index = max(0, (episode - 1) // chunk_size)
+        # 1st/3rd/5th chunks (index 0/2/4) decay normally.
+        # 2nd/4th/6th chunks (index 1/3/5) run at epsilon_min.
+        if chunk_index % 2 == 1:
+            epsilon = cfg.epsilon_min
 
     # Batch size: grows quadratically (small batches early, big batches late)
     batch_size = int(round(cfg.batch_size_start + (cfg.batch_size_end - cfg.batch_size_start) * (progress**2)))
