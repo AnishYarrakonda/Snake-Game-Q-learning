@@ -21,8 +21,10 @@ APPLE_CHOICES = (1, 3, 5, 10)
 ACTIONS = ("up", "down", "left", "right")
 REVERSE_DIRECTION = {"up": "down", "down": "up", "left": "right", "right": "left"}
 STATE_ENCODING_INTEGER = "integer12"
-SUPPORTED_STATE_ENCODINGS = (STATE_ENCODING_INTEGER, "compact11")
+STATE_ENCODING_BOARD = "board_cnn"
+SUPPORTED_STATE_ENCODINGS = (STATE_ENCODING_INTEGER, "compact11", STATE_ENCODING_BOARD)
 STATE_SIZE = 32  # number of features in the encoded state vector
+BOARD_STATE_CHANNELS = 8
 MIN_HIDDEN_LAYERS = 1
 MAX_HIDDEN_LAYERS = 8
 MIN_NEURONS_PER_LAYER = 8
@@ -98,37 +100,37 @@ class TrainConfig:
     board_size: int = 10
     apples: int = 5
     episodes: int = 10000
-    max_steps: int = 2000          # was 250 — must be large for late-game navigation
+    max_steps: int = 1200
     gamma: float = 0.96
     lr: float = 0.001
     epsilon_start: float = 1.0
     epsilon_min: float = 0.05
     epsilon_decay: float = 0.994
     batch_size: int = 128
-    memory_size: int = 50_000
+    memory_size: int = 40_000
     replay_warmup: int = 0
     hidden_layers: tuple[int, ...] = (512, 384, 256, 128)
     target_update_every: int = 1
     soft_tau: float = 0.01
     n_step: int = 7
     step_delay: float = 0.0
-    state_encoding: str = STATE_ENCODING_INTEGER
-    stall_limit_factor: int = 45
+    state_encoding: str = STATE_ENCODING_BOARD
+    stall_limit_factor: int = 25
     lr_start: float = 1e-3
     lr_end: float = 2e-4
     gamma_start: float = 0.96
     gamma_end: float = 0.995
     epsilon_decay_rate: float = 10.0
-    epsilon_burst_chunk_size: int = 250
+    epsilon_burst_chunk_size: int = 100
     epsilon_burst_odd_chunks_only: bool = True
     batch_size_start: int = 64
     batch_size_end: int = 128
     # --- reward shaping ---
     food_reward_base: float = 1.0
     food_reward_min: float = 0.35
-    survival_reward_start: float = 0.05
-    survival_reward_end: float = 0.30
-    death_reward: float = -2.8
+    survival_reward_start: float = 0.005
+    survival_reward_end: float = 0.03
+    death_reward: float = -3.2
     # flood fill positioning bonus — reward agent for keeping more open space
     flood_fill_bonus_weight: float = 0.08
     # tail proximity bonus — reward agent for keeping escape route via tail
@@ -140,14 +142,20 @@ class TrainConfig:
     terminal_bonus_power: float = 1.8
     # Long-game reward mode.
     survival_focus_length: int = 15
-    survival_focus_multiplier: float = 3.5
+    survival_focus_multiplier: float = 8.0
     food_reward_late_scale: float = 0.40
     # Positioning safety terms to avoid self-traps.
     open_space_delta_weight: float = 0.60
     dead_end_penalty_weight: float = 0.35
     tail_unreachable_penalty: float = 0.12
-    stall_step_penalty: float = 0.04
-    food_progress_weight: float = 0.02
+    stall_step_penalty: float = 0.12
+    food_progress_weight: float = 0.04
+    # Replay sampling
+    use_prioritized_replay: bool = True
+    per_alpha: float = 0.6
+    per_beta_start: float = 0.4
+    per_beta_end: float = 1.0
+    per_beta_anneal_steps: int = 200_000
     q_explosion_threshold: float = 100.0
 
     def __post_init__(self) -> None:
@@ -170,6 +178,16 @@ class TrainConfig:
             raise ValueError("epsilon_burst_chunk_size must be > 0.")
         if self.survival_focus_length < 3:
             raise ValueError("survival_focus_length must be >= 3.")
+        if not (0.0 <= self.per_alpha <= 1.0):
+            raise ValueError("per_alpha must be in [0, 1].")
+        if not (0.0 <= self.per_beta_start <= 1.0):
+            raise ValueError("per_beta_start must be in [0, 1].")
+        if not (0.0 <= self.per_beta_end <= 1.0):
+            raise ValueError("per_beta_end must be in [0, 1].")
+        if self.per_beta_end < self.per_beta_start:
+            raise ValueError("per_beta_end must be >= per_beta_start.")
+        if self.per_beta_anneal_steps <= 0:
+            raise ValueError("per_beta_anneal_steps must be > 0.")
 
 
 @dataclass(frozen=True)
@@ -209,7 +227,10 @@ class AgentLike(Protocol):
 
 
 def default_model_path(board_size: int, state_encoding: str = STATE_ENCODING_INTEGER) -> str:
-    mode = "integer12" if state_encoding in SUPPORTED_STATE_ENCODINGS else state_encoding
+    if state_encoding == "compact11":
+        mode = "integer12"
+    else:
+        mode = state_encoding
     return os.path.join(MODELS_DIR, f"snake_dqn_{mode}_{board_size}x{board_size}.pt")
 
 
@@ -466,9 +487,60 @@ def encode_integer_state_v2(game: SnakeGame) -> np.ndarray:
     return state
 
 
+def encode_board_state(game: SnakeGame) -> np.ndarray:
+    """
+    CNN-friendly board encoding with shape [C, H, W].
+    Channels:
+      0 head map
+      1 body map (excluding head)
+      2 tail map
+      3 apple map
+      4 occupied map (all snake cells)
+      5 free-space map
+      6 direction-x plane (-1 left, +1 right)
+      7 direction-y plane (-1 up, +1 down)
+    """
+    size = game.config.grid_size
+    state = np.zeros((BOARD_STATE_CHANNELS, size, size), dtype=np.float32)
+
+    if not game.snake:
+        return state
+
+    hx, hy = game.snake[0]
+    tx, ty = game.snake[-1]
+
+    state[0, hy, hx] = 1.0
+    for bx, by in list(game.snake)[1:]:
+        state[1, by, bx] = 1.0
+    state[2, ty, tx] = 1.0
+
+    for ax, ay in game.apples:
+        state[3, ay, ax] = 1.0
+
+    for sx, sy in game.snake_set:
+        state[4, sy, sx] = 1.0
+    state[5] = 1.0 - state[4]
+
+    dx = 0.0
+    dy = 0.0
+    if game.direction == "left":
+        dx = -1.0
+    elif game.direction == "right":
+        dx = 1.0
+    elif game.direction == "up":
+        dy = -1.0
+    elif game.direction == "down":
+        dy = 1.0
+    state[6].fill(dx)
+    state[7].fill(dy)
+    return state
+
+
 def encode_state(game: SnakeGame, cfg: TrainConfig) -> np.ndarray:
     if cfg.state_encoding not in SUPPORTED_STATE_ENCODINGS:
         raise ValueError(f"Unsupported state encoding: {cfg.state_encoding}")
+    if cfg.state_encoding == STATE_ENCODING_BOARD:
+        return encode_board_state(game)
     return encode_integer_state_v2(game)
 
 
@@ -508,6 +580,11 @@ def episode_dynamics(episode: int, cfg: TrainConfig) -> EpisodeDynamics:
     if cfg.epsilon_burst_odd_chunks_only:
         chunk_size = max(1, cfg.epsilon_burst_chunk_size)
         chunk_index = max(0, (episode - 1) // chunk_size)
+        # Keep odd chunks exploratory but avoid very high-reset behavior that
+        # erases long-horizon policy improvements.
+        odd_chunk_cap = cfg.epsilon_min + 0.30 * (1.0 - progress)
+        if chunk_index % 2 == 0:
+            epsilon = min(epsilon, odd_chunk_cap)
         # 1st/3rd/5th chunks (index 0/2/4) decay normally.
         # 2nd/4th/6th chunks (index 1/3/5) run at epsilon_min.
         if chunk_index % 2 == 1:
@@ -645,6 +722,34 @@ def make_game(cfg: TrainConfig) -> SnakeGame:
     return SnakeGame(game_cfg)
 
 
+def _safe_action_indices_from_game(game: SnakeGame, action_indices: list[int]) -> list[int]:
+    """Exclude immediate self/wall collisions when at least one safe move exists."""
+    if not action_indices or not game.snake:
+        return action_indices
+
+    hx, hy = game.snake[0]
+    deltas = {
+        "up": (0, -1),
+        "down": (0, 1),
+        "left": (-1, 0),
+        "right": (1, 0),
+    }
+
+    safe: list[int] = []
+    for action_idx in action_indices:
+        direction = ACTIONS[action_idx]
+        dx, dy = deltas[direction]
+        nx, ny = hx + dx, hy + dy
+        if len(game.snake) > 1:
+            tail = game.snake[-1]
+            if (nx, ny) == tail and (nx, ny) not in game.apples:
+                safe.append(action_idx)
+                continue
+        if not _is_collision(game, nx, ny):
+            safe.append(action_idx)
+    return safe if safe else action_indices
+
+
 def run_episode(
     agent: AgentLike,
     cfg: TrainConfig,
@@ -707,6 +812,7 @@ def run_episode(
         prev_open_fraction = _full_flood_fill(game, prev_hx, prev_hy) / float(max(1, board_capacity))
         prev_food_distance = nearest_apple_distance(game)
         valid_actions = agent.valid_action_indices(game.direction)
+        valid_actions = _safe_action_indices_from_game(game, valid_actions)
         action_idx = agent.select_action(state, valid_actions, explore=train)
         action_to_direction = getattr(agent, "action_to_direction", None)
         if callable(action_to_direction):
@@ -748,6 +854,10 @@ def run_episode(
         if alive:
             survival_mult = cfg.survival_focus_multiplier if in_survival_focus else 1.0
             survival_reward = dynamics.survival_reward * survival_mult
+            if new_length == old_length:
+                stall_budget_local = float(max(1, cfg.stall_limit_factor * max(1, len(game.snake))))
+                stagnation_ratio = min(1.0, stagnation_steps / stall_budget_local)
+                survival_reward *= max(0.15, 1.0 - 0.85 * stagnation_ratio)
 
         death_reward = 0.0
         if not alive or stalled:

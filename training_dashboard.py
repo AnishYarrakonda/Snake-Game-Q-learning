@@ -30,7 +30,9 @@ try:
         MAX_HIDDEN_LAYERS,
         MIN_HIDDEN_LAYERS,
         MODELS_DIR,
+        STATE_ENCODING_BOARD,
         STATE_ENCODING_INTEGER,
+        SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
         chunked_mean,
         default_model_path,
@@ -48,7 +50,9 @@ except ImportError:
         MAX_HIDDEN_LAYERS,
         MIN_HIDDEN_LAYERS,
         MODELS_DIR,
+        STATE_ENCODING_BOARD,
         STATE_ENCODING_INTEGER,
+        SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
         chunked_mean,
         default_model_path,
@@ -205,7 +209,7 @@ class TrainingDashboard:
         self._make_btn(cfg_btn_row, "Load Config", self.load_config, w=12).pack(side="left", padx=2)
         help_label = tk.Label(
             controls,
-            text="Shortcuts: Ctrl+T Train, Ctrl+W Watch, Ctrl+S Stop, Ctrl+L Load, Ctrl+Shift+S Save, F5 Train",
+            text="Shortcuts: Ctrl+W Watch, Ctrl+S Stop, Ctrl+L Load, Ctrl+Shift+S Save",
             fg=self.TEXT_MUTED,
             bg=self.PANEL_BG,
             font=("Helvetica", 8),
@@ -517,7 +521,7 @@ class TrainingDashboard:
             epsilon_start=epsilon_start,
             epsilon_min=epsilon_min,
             epsilon_decay_rate=epsilon_decay_rate,
-            state_encoding=STATE_ENCODING_INTEGER,
+            state_encoding=STATE_ENCODING_BOARD,
             step_delay=anim_delay_ms / 1000.0,
         )
 
@@ -591,29 +595,51 @@ class TrainingDashboard:
             )
 
     def _update_state_display(self, state: np.ndarray) -> None:
-        if len(state) != 32:
-            return
+        lines: list[str]
+        if state.ndim == 1 and state.shape[0] == 32:
+            danger = state[0:4]
+            direc = state[4:8]
+            food_d = state[8:12]
+            food_pos = state[12:15]
+            flood = state[15:19]
+            tail = state[19:23]
+            body_d = state[23:27]
+            length = state[27]
+            quads = state[28:32]
+            lines = [
+                "Danger   [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in danger),
+                "Dir      [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in direc),
+                "Food dir [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in food_d),
+                "Food pos [dx dy dist]: " + "  ".join(f"{v:.2f}" for v in food_pos),
+                "Flood    [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in flood),
+                "Flood bars           : " + " ".join("#" * int(max(0.0, min(1.0, v)) * 8) for v in flood),
+                "Tail [reach dx dy d]: " + "  ".join(f"{v:.2f}" for v in tail),
+                "Body dist[U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in body_d),
+                f"Length norm: {length:.3f}   Quads [NW NE SW SE]: " + "  ".join(f"{v:.2f}" for v in quads),
+            ]
+        elif state.ndim == 3 and state.shape[0] >= 8:
+            hmap = state[0]
+            tmap = state[2]
+            amap = state[3]
+            occupied = state[4]
+            free = state[5]
+            dir_x = float(np.mean(state[6]))
+            dir_y = float(np.mean(state[7]))
+            hy, hx = np.unravel_index(int(np.argmax(hmap)), hmap.shape)
+            ty, tx = np.unravel_index(int(np.argmax(tmap)), tmap.shape)
+            ay, ax = np.unravel_index(int(np.argmax(amap)), amap.shape) if float(amap.max()) > 0.0 else (hy, hx)
+            occ_ratio = float(np.mean(occupied))
+            free_ratio = float(np.mean(free))
+            lines = [
+                f"CNN board state: shape={tuple(state.shape)}",
+                f"Head(x,y)=({hx},{hy})  Tail(x,y)=({tx},{ty})  Apple(x,y)=({ax},{ay})",
+                f"Dir planes: dx={dir_x:.2f} dy={dir_y:.2f}",
+                f"Occupied ratio={occ_ratio:.3f}  Free ratio={free_ratio:.3f}",
+                "Channels: [head, body, tail, apple, occupied, free, dir_x, dir_y]",
+            ]
+        else:
+            lines = [f"Unsupported state shape: {tuple(state.shape)}"]
 
-        danger = state[0:4]
-        direc = state[4:8]
-        food_d = state[8:12]
-        food_pos = state[12:15]
-        flood = state[15:19]
-        tail = state[19:23]
-        body_d = state[23:27]
-        length = state[27]
-        quads = state[28:32]
-        lines = [
-            "Danger   [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in danger),
-            "Dir      [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in direc),
-            "Food dir [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in food_d),
-            "Food pos [dx dy dist]: " + "  ".join(f"{v:.2f}" for v in food_pos),
-            "Flood    [U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in flood),
-            "Flood bars           : " + " ".join("#" * int(max(0.0, min(1.0, v)) * 8) for v in flood),
-            "Tail [reach dx dy d]: " + "  ".join(f"{v:.2f}" for v in tail),
-            "Body dist[U  D  L  R]: " + "  ".join(f"{v:.2f}" for v in body_d),
-            f"Length norm: {length:.3f}   Quads [NW NE SW SE]: " + "  ".join(f"{v:.2f}" for v in quads),
-        ]
         self.state_text.config(state="normal")
         self.state_text.delete("1.0", "end")
         self.state_text.insert("1.0", "\n".join(lines))
@@ -723,90 +749,11 @@ class TrainingDashboard:
         self._update_plot()
 
     def start_training(self) -> None:
-        if self.pending_epsilon_changes:
-            messagebox.showinfo("Pending Settings", "Epsilon settings changed. Click Apply Epsilon before training.")
-            return
-        if self.pending_visual_changes:
-            messagebox.showinfo("Pending Settings", "Color settings changed. Click Apply Colors before training.")
-            return
-        try:
-            cfg = self._read_cfg_from_ui()
-        except ValueError as exc:
-            messagebox.showerror("Invalid Config", str(exc))
-            return
-
-        self._sync_agent_to_cfg(cfg)
-        self._set_runtime_cfg(cfg)
-        self.active_training_immutable = (cfg.board_size, cfg.apples, cfg.episodes)
-        print(f"\nUsing device: {self.agent.device}\n")
-        self.status_var.set(f"Ready | Device: {self.agent.device}")
-        self._clear_series()
-
-        def worker() -> None:
-            try:
-                recent_scores: deque[float] = deque(maxlen=10)
-                log_chunk_size = max(1, int(self.print_every_var.get().strip()))
-                episode_game = make_game(cfg)
-                train_start_t = time.perf_counter()
-                chunk_start_t = train_start_t
-
-                def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
-                    if self.stop_event.is_set():
-                        return
-                    current_cfg = self._get_runtime_cfg()
-                    state = encode_state(game, current_cfg)
-                    self.msg_queue.put(
-                        {
-                            "type": "step",
-                            "snapshot": {
-                                "size": game.config.grid_size,
-                                "snake": list(game.snake),
-                                "apples": list(game.apples),
-                            },
-                            "state": state.tolist(),
-                        }
-                    )
-
-                total_episodes = cfg.episodes
-                for episode in range(1, total_episodes + 1):
-                    if self.stop_event.is_set():
-                        break
-                    current_cfg = self._get_runtime_cfg()
-
-                    score, _, _, _ = run_episode(
-                        self.agent,
-                        current_cfg,
-                        episode_index=episode,
-                        train=True,
-                        render_step=on_step,
-                        stop_flag=self.stop_event,
-                        game=episode_game,
-                    )
-
-                    recent_scores.append(float(score))
-                    avg = float(np.mean(recent_scores))
-
-                    self.msg_queue.put(
-                        {
-                            "type": "episode",
-                            "episode": episode,
-                            "total": total_episodes,
-                            "score": score,
-                            "avg": avg,
-                            "epsilon": self.agent.epsilon,
-                            "elapsed_total_sec": time.perf_counter() - train_start_t,
-                            "elapsed_chunk_sec": time.perf_counter() - chunk_start_t,
-                        }
-                    )
-                    if episode % log_chunk_size == 0:
-                        chunk_start_t = time.perf_counter()
-
-                done_text = "Training stopped" if self.stop_event.is_set() else "Training complete"
-                self.msg_queue.put({"type": "done", "text": done_text, "ask_save": True})
-            except Exception as exc:
-                self.msg_queue.put({"type": "error", "text": str(exc)})
-
-        self._launch_worker(worker)
+        messagebox.showinfo(
+            "Offline Training Only",
+            "Run training with train_offline.py.\nThis dashboard is now for loading models/checkpoints and watch mode.",
+        )
+        self.status_var.set("Training disabled in dashboard. Use train_offline.py")
 
     def start_watch(self) -> None:
         if self.pending_epsilon_changes:
@@ -1038,7 +985,26 @@ class TrainingDashboard:
             return
 
         try:
-            metadata = SnakeDQNAgent.load_metadata(path)
+            try:
+                metadata = SnakeDQNAgent.load_metadata(path)
+            except Exception as meta_exc:
+                if path.lower().endswith(".ckpt"):
+                    # Fallback path for legacy/non-standard checkpoint metadata.
+                    cfg = self._read_cfg_from_ui()
+                    tried_errors: list[str] = []
+                    for encoding in (cfg.state_encoding, STATE_ENCODING_INTEGER, STATE_ENCODING_BOARD):
+                        try:
+                            self._sync_agent_to_cfg(replace(cfg, state_encoding=encoding))
+                            loaded_episode, _ = self.agent.load_checkpoint(path)
+                            self.status_var.set(f"Loaded checkpoint: {path} (episode {loaded_episode})")
+                            return
+                        except Exception as load_exc:
+                            tried_errors.append(f"{encoding}: {load_exc}")
+                    raise ValueError(
+                        f"Could not load checkpoint metadata ({meta_exc}). "
+                        f"Fallback attempts failed -> {' | '.join(tried_errors)}"
+                    )
+                raise meta_exc
             board_size = metadata.get("board_size", self.cfg.board_size)
             if board_size not in BOARD_SIZES:
                 raise ValueError(f"Unsupported board size in model: {board_size}")
@@ -1049,7 +1015,7 @@ class TrainingDashboard:
             state_encoding = str(metadata.get("state_encoding", cfg_data.get("state_encoding", STATE_ENCODING_INTEGER)))
             if state_encoding == "compact11":
                 state_encoding = STATE_ENCODING_INTEGER
-            if state_encoding != STATE_ENCODING_INTEGER:
+            if state_encoding not in SUPPORTED_STATE_ENCODINGS:
                 raise ValueError(f"Unsupported state encoding in model: {state_encoding}")
             apples = int(cfg_data.get("apples", self.apple_var.get()))
             if apples in APPLE_CHOICES:
@@ -1060,7 +1026,7 @@ class TrainingDashboard:
             self.hidden_layer_count_var.set(str(len(hidden_layers)))
             self.neurons_var.set(self._format_hidden_layers_for_ui(hidden_layers))
 
-            cfg = self._read_cfg_from_ui()
+            cfg = replace(self._read_cfg_from_ui(), state_encoding=state_encoding)
             self._sync_agent_to_cfg(cfg)
             if path.lower().endswith(".ckpt"):
                 loaded_episode, _ = self.agent.load_checkpoint(path)

@@ -8,13 +8,14 @@ from typing import Any
 import numpy as np
 import torch
 from torch import nn
-import torch.nn.functional as F
 
 try:
     from .utils import (
         ACTIONS,
+        BOARD_STATE_CHANNELS,
         REVERSE_DIRECTION,
         EpisodeDynamics,
+        STATE_ENCODING_BOARD,
         STATE_ENCODING_INTEGER,
         STATE_SIZE,
         SUPPORTED_STATE_ENCODINGS,
@@ -24,8 +25,10 @@ try:
 except ImportError:
     from utils import (
         ACTIONS,
+        BOARD_STATE_CHANNELS,
         REVERSE_DIRECTION,
         EpisodeDynamics,
+        STATE_ENCODING_BOARD,
         STATE_ENCODING_INTEGER,
         STATE_SIZE,
         SUPPORTED_STATE_ENCODINGS,
@@ -37,6 +40,112 @@ VALID_ACTIONS_BY_DIRECTION = {
     direction: [idx for idx, action in enumerate(ACTIONS) if action != REVERSE_DIRECTION[direction]]
     for direction in ACTIONS
 }
+
+
+class PrioritizedReplayBuffer:
+    """Proportional prioritized replay with numpy-backed priorities."""
+
+    def __init__(self, capacity: int, alpha: float = 0.6, epsilon: float = 1e-6) -> None:
+        self.capacity = max(1, int(capacity))
+        self.alpha = float(alpha)
+        self.epsilon = float(epsilon)
+        self.storage: list[tuple[np.ndarray, int, float, np.ndarray, str, bool, float]] = []
+        self.priorities = np.zeros(self.capacity, dtype=np.float32)
+        self.position = 0
+
+    @property
+    def maxlen(self) -> int:
+        return self.capacity
+
+    def __len__(self) -> int:
+        return len(self.storage)
+
+    def __iter__(self):
+        return iter(self.storage)
+
+    def append(self, transition: tuple[np.ndarray, int, float, np.ndarray, str, bool, float]) -> None:
+        if len(self.storage) < self.capacity:
+            self.storage.append(transition)
+        else:
+            self.storage[self.position] = transition
+
+        max_prio = float(self.priorities[: max(1, len(self.storage))].max()) if len(self.storage) > 1 else 1.0
+        self.priorities[self.position] = max(1e-3, max_prio)
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(
+        self,
+        batch_size: int,
+        beta: float,
+    ) -> tuple[list[tuple[np.ndarray, int, float, np.ndarray, str, bool, float]], np.ndarray, np.ndarray]:
+        size = len(self.storage)
+        if size == 0:
+            raise ValueError("Cannot sample from an empty replay buffer.")
+
+        priorities = self.priorities[:size].astype(np.float64)
+        if not np.isfinite(priorities).all() or float(priorities.sum()) <= 0.0:
+            priorities = np.ones(size, dtype=np.float64)
+        priorities = np.clip(priorities, 1e-8, None)
+
+        scaled = np.power(priorities, self.alpha)
+        total = float(scaled.sum())
+        if total <= 0.0 or not np.isfinite(total):
+            probs = np.full(size, 1.0 / float(size), dtype=np.float64)
+        else:
+            probs = scaled / total
+            probs = probs / float(np.sum(probs))
+
+        sample_size = min(size, max(1, int(batch_size)))
+        indices = np.random.choice(size, size=sample_size, replace=False, p=probs)
+        batch = [self.storage[int(idx)] for idx in indices]
+
+        weights = np.power(size * probs[indices], -float(beta)).astype(np.float32)
+        max_w = float(np.max(weights))
+        if max_w > 0.0:
+            weights /= max_w
+        else:
+            weights.fill(1.0)
+        return batch, indices.astype(np.int64), weights.astype(np.float32)
+
+    def update_priorities(self, indices: np.ndarray, td_errors: np.ndarray) -> None:
+        abs_errors = np.abs(td_errors).astype(np.float32)
+        for idx, error in zip(indices, abs_errors):
+            if 0 <= int(idx) < len(self.storage):
+                self.priorities[int(idx)] = float(max(self.epsilon, error))
+
+
+class CNNQNetwork(nn.Module):
+    """Compact dueling CNN for board-state tensors [C, H, W]."""
+
+    def __init__(self, input_channels: int, output_size: int = 4) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 96, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+        )
+        self.value_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(96, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
+        self.adv_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(96, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_size),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.features(x)
+        value = self.value_head(z)
+        adv = self.adv_head(z)
+        return value + adv - adv.mean(dim=1, keepdim=True)
 
 
 class MLPQNetwork(nn.Module):
@@ -90,22 +199,38 @@ class SnakeDQNAgent:
         else:
             self.device = torch.device("cpu")
 
+        self.uses_cnn = cfg.state_encoding == STATE_ENCODING_BOARD
         hidden_layers = normalize_hidden_layers(cfg.hidden_layers)
-        self.policy_net = MLPQNetwork(
-            STATE_SIZE,
-            hidden_layers=hidden_layers,
-            output_size=len(self.action_space),
-        ).to(self.device)
-        self.target_net = MLPQNetwork(
-            STATE_SIZE,
-            hidden_layers=hidden_layers,
-            output_size=len(self.action_space),
-        ).to(self.device)
+        if self.uses_cnn:
+            self.policy_net = CNNQNetwork(
+                input_channels=BOARD_STATE_CHANNELS,
+                output_size=len(self.action_space),
+            ).to(self.device)
+            self.target_net = CNNQNetwork(
+                input_channels=BOARD_STATE_CHANNELS,
+                output_size=len(self.action_space),
+            ).to(self.device)
+        else:
+            self.policy_net = MLPQNetwork(
+                STATE_SIZE,
+                hidden_layers=hidden_layers,
+                output_size=len(self.action_space),
+            ).to(self.device)
+            self.target_net = MLPQNetwork(
+                STATE_SIZE,
+                hidden_layers=hidden_layers,
+                output_size=len(self.action_space),
+            ).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
         self.optimizer = torch.optim.AdamW(self.policy_net.parameters(), lr=cfg.lr, weight_decay=1e-5)
-        self.memory: deque[tuple[np.ndarray, int, float, np.ndarray, str, bool, float]] = deque(maxlen=cfg.memory_size)
+        if cfg.use_prioritized_replay:
+            self.memory: PrioritizedReplayBuffer | deque[tuple[np.ndarray, int, float, np.ndarray, str, bool, float]] = (
+                PrioritizedReplayBuffer(cfg.memory_size, alpha=cfg.per_alpha)
+            )
+        else:
+            self.memory = deque(maxlen=cfg.memory_size)
 
         self.epsilon = cfg.epsilon_start
         self.learn_steps = 0
@@ -124,12 +249,55 @@ class SnakeDQNAgent:
         return ACTIONS[action_idx]
 
     @staticmethod
-    def _safe_action_indices_from_state(state: np.ndarray, valid_indices: list[int]) -> list[int]:
-        # State[0:4] encodes immediate danger for [up, down, left, right].
-        if state.shape[0] < 4:
+    def _safe_action_indices_from_vector_state(state: np.ndarray, valid_indices: list[int]) -> list[int]:
+        # Vector state uses danger flags at indices [0:4] for [up, down, left, right].
+        if state.ndim != 1 or state.shape[0] < 4:
             return valid_indices
         safe = [idx for idx in valid_indices if float(state[idx]) < 0.5]
         return safe if safe else valid_indices
+
+    @staticmethod
+    def _safe_action_indices_from_board_state(state: np.ndarray, valid_indices: list[int]) -> list[int]:
+        # Board state channels:
+        # 0=head, 2=tail, 3=apple, 4=occupied.
+        if state.ndim != 3 or state.shape[0] < 5:
+            return valid_indices
+        head_map = state[0]
+        if float(head_map.sum()) <= 0.0:
+            return valid_indices
+        hy, hx = np.unravel_index(int(np.argmax(head_map)), head_map.shape)
+        occupied = state[4]
+        tail_map = state[2] if state.shape[0] > 2 else np.zeros_like(occupied)
+        apple_map = state[3] if state.shape[0] > 3 else np.zeros_like(occupied)
+        height, width = occupied.shape
+
+        deltas = {
+            0: (0, -1),  # up
+            1: (0, 1),   # down
+            2: (-1, 0),  # left
+            3: (1, 0),   # right
+        }
+        safe: list[int] = []
+        for idx in valid_indices:
+            dx, dy = deltas.get(idx, (0, 0))
+            nx, ny = hx + dx, hy + dy
+            if nx < 0 or nx >= width or ny < 0 or ny >= height:
+                continue
+            blocked = float(occupied[ny, nx]) > 0.5
+            if blocked:
+                # Moving into tail is often safe if tail will vacate and no apple sits there.
+                tail_cell = float(tail_map[ny, nx]) > 0.5
+                apple_cell = float(apple_map[ny, nx]) > 0.5
+                if tail_cell and not apple_cell:
+                    safe.append(idx)
+                continue
+            safe.append(idx)
+        return safe if safe else valid_indices
+
+    def _safe_action_indices_from_state(self, state: np.ndarray, valid_indices: list[int]) -> list[int]:
+        if self.uses_cnn:
+            return self._safe_action_indices_from_board_state(state, valid_indices)
+        return self._safe_action_indices_from_vector_state(state, valid_indices)
 
     def select_action(self, state: np.ndarray, valid_indices: list[int], explore: bool = True) -> int:
         if explore and random.random() < self.epsilon:
@@ -171,12 +339,21 @@ class SnakeDQNAgent:
             return None
 
         sample_size = min(len(self.memory), self.batch_size_current)
-        batch = random.sample(self.memory, sample_size)
+        sample_indices: np.ndarray | None = None
+        sample_weights_np: np.ndarray
+        if isinstance(self.memory, PrioritizedReplayBuffer):
+            beta_progress = min(1.0, self.learn_steps / float(max(1, self.cfg.per_beta_anneal_steps)))
+            beta = self.cfg.per_beta_start + (self.cfg.per_beta_end - self.cfg.per_beta_start) * beta_progress
+            batch, sample_indices, sample_weights_np = self.memory.sample(sample_size, beta=beta)
+        else:
+            batch = random.sample(self.memory, sample_size)
+            sample_weights_np = np.ones(sample_size, dtype=np.float32)
 
-        states_np = np.empty((sample_size, STATE_SIZE), dtype=np.float32)
+        state_shape = batch[0][0].shape
+        states_np = np.empty((sample_size, *state_shape), dtype=np.float32)
         actions_np = np.empty(sample_size, dtype=np.int64)
         rewards_np = np.empty(sample_size, dtype=np.float32)
-        next_states_np = np.empty((sample_size, STATE_SIZE), dtype=np.float32)
+        next_states_np = np.empty((sample_size, *state_shape), dtype=np.float32)
         dones_np = np.empty(sample_size, dtype=np.float32)
         discounts_np = np.empty(sample_size, dtype=np.float32)
         next_directions: list[str] = []
@@ -196,6 +373,7 @@ class SnakeDQNAgent:
         next_states_t = torch.from_numpy(next_states_np).to(self.device)
         dones_t = torch.from_numpy(dones_np).to(self.device)
         discounts_t = torch.from_numpy(discounts_np).to(self.device)
+        sample_weights_t = torch.from_numpy(sample_weights_np).to(self.device)
 
         current_q = self.policy_net(states_t).gather(1, actions_t.unsqueeze(1)).squeeze(1)
 
@@ -205,7 +383,7 @@ class SnakeDQNAgent:
             masked_next_policy_q = torch.full_like(next_policy_q, -1e9)
             for idx, direction in enumerate(next_directions):
                 valid_indices = VALID_ACTIONS_BY_DIRECTION[direction]
-                safe_indices = [action for action in valid_indices if next_states_np[idx, action] < 0.5]
+                safe_indices = self._safe_action_indices_from_state(next_states_np[idx], valid_indices)
                 allowed_indices = safe_indices if safe_indices else valid_indices
                 masked_next_policy_q[idx, allowed_indices] = next_policy_q[idx, allowed_indices]
             next_actions = masked_next_policy_q.argmax(dim=1, keepdim=True)
@@ -214,11 +392,16 @@ class SnakeDQNAgent:
         target_q = rewards_t + discounts_t * next_q * (1.0 - dones_t)
         td_error = target_q - current_q
 
-        loss = F.smooth_l1_loss(current_q, target_q)
+        abs_td = td_error.abs()
+        per_sample_loss = torch.where(abs_td < 1.0, 0.5 * td_error.pow(2), abs_td - 0.5)
+        loss = (per_sample_loss * sample_weights_t).mean()
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
         self.optimizer.step()
+
+        if isinstance(self.memory, PrioritizedReplayBuffer) and sample_indices is not None:
+            self.memory.update_priorities(sample_indices, abs_td.detach().cpu().numpy())
 
         # Continuous soft target update each optimization step.
         for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
@@ -281,9 +464,21 @@ class SnakeDQNAgent:
                 if isinstance(value, torch.Tensor):
                     state[key] = value.to(self.device)
 
+    def _new_replay_buffer(self, capacity: int | None = None):
+        cap = int(capacity or self.cfg.memory_size)
+        if self.cfg.use_prioritized_replay:
+            return PrioritizedReplayBuffer(cap, alpha=self.cfg.per_alpha)
+        return deque(maxlen=cap)
+
     def save_checkpoint(self, path: str, episode_index: int, replay_buffer) -> None:
         """Save full training state to allow exact resume."""
         replay_items = list(replay_buffer)
+        replay_kind = "prioritized" if isinstance(replay_buffer, PrioritizedReplayBuffer) else "uniform"
+        replay_priorities: list[float] | None = None
+        replay_position: int | None = None
+        if isinstance(replay_buffer, PrioritizedReplayBuffer):
+            replay_priorities = replay_buffer.priorities.tolist()
+            replay_position = int(replay_buffer.position)
         payload = {
             "checkpoint_version": 1,
             "episode_index": int(episode_index),
@@ -297,6 +492,9 @@ class SnakeDQNAgent:
             "optimizer_state_dict": self.optimizer.state_dict(),
             "replay_buffer": replay_items,
             "replay_buffer_maxlen": getattr(replay_buffer, "maxlen", self.cfg.memory_size) or self.cfg.memory_size,
+            "replay_kind": replay_kind,
+            "replay_priorities": replay_priorities,
+            "replay_position": replay_position,
             "agent_state": {
                 "epsilon": float(self.epsilon),
                 "gamma": float(self.gamma),
@@ -312,14 +510,14 @@ class SnakeDQNAgent:
         }
         torch.save(payload, path)
 
-    def load_checkpoint(self, path: str) -> tuple[int, deque]:
+    def load_checkpoint(self, path: str) -> tuple[int, object]:
         """Load full training state and return (episode_index, replay_buffer)."""
         payload = self._torch_load(path, map_location=self.device)
         # Backward compatibility: old saves only had model weights and metadata.
         if "policy_state_dict" not in payload or "optimizer_state_dict" not in payload:
             self.load(path)
             self.loaded_legacy_payload = True
-            replay_buffer = deque(maxlen=self.cfg.memory_size)
+            replay_buffer = self._new_replay_buffer(self.cfg.memory_size)
             self.memory = replay_buffer
             self.batch_size_current = self.cfg.batch_size
             self.replay_warmup = 0
@@ -350,12 +548,13 @@ class SnakeDQNAgent:
                 f"Checkpoint action space ({payload_action_space_size}) does not match current action space "
                 f"({len(self.action_space)})."
             )
-        payload_hidden_layers = self._hidden_layers_from_payload(payload, self.cfg.hidden_layers)
-        if payload_hidden_layers != self.cfg.hidden_layers:
-            raise ValueError(
-                f"Checkpoint hidden layers {payload_hidden_layers} do not match current hidden layers "
-                f"{self.cfg.hidden_layers}."
-            )
+        if not self.uses_cnn:
+            payload_hidden_layers = self._hidden_layers_from_payload(payload, self.cfg.hidden_layers)
+            if payload_hidden_layers != self.cfg.hidden_layers:
+                raise ValueError(
+                    f"Checkpoint hidden layers {payload_hidden_layers} do not match current hidden layers "
+                    f"{self.cfg.hidden_layers}."
+                )
 
         self.policy_net.load_state_dict(payload["policy_state_dict"])
         self.target_net.load_state_dict(payload["target_state_dict"])
@@ -366,7 +565,18 @@ class SnakeDQNAgent:
 
         replay_items = payload.get("replay_buffer", [])
         replay_maxlen = int(payload.get("replay_buffer_maxlen", self.cfg.memory_size))
-        replay_buffer = deque(replay_items, maxlen=replay_maxlen)
+        replay_kind = str(payload.get("replay_kind", "uniform"))
+        if replay_kind == "prioritized" or self.cfg.use_prioritized_replay:
+            replay_buffer = PrioritizedReplayBuffer(replay_maxlen, alpha=self.cfg.per_alpha)
+            for item in replay_items:
+                replay_buffer.append(item)
+            raw_priorities = payload.get("replay_priorities")
+            if isinstance(raw_priorities, list) and raw_priorities:
+                arr = np.asarray(raw_priorities, dtype=np.float32)
+                replay_buffer.priorities[: min(arr.size, replay_buffer.maxlen)] = arr[: replay_buffer.maxlen]
+            replay_buffer.position = int(payload.get("replay_position", replay_buffer.position))
+        else:
+            replay_buffer = deque(replay_items, maxlen=replay_maxlen)
         self.memory = replay_buffer
 
         agent_state = payload.get("agent_state", {})
@@ -441,11 +651,12 @@ class SnakeDQNAgent:
                 f"Model action space ({payload_action_space_size}) does not match current action space "
                 f"({len(self.action_space)})."
             )
-        payload_hidden_layers = self._hidden_layers_from_payload(payload, self.cfg.hidden_layers)
-        if payload_hidden_layers != self.cfg.hidden_layers:
-            raise ValueError(
-                f"Model hidden layers {payload_hidden_layers} do not match current hidden layers {self.cfg.hidden_layers}."
-            )
+        if not self.uses_cnn:
+            payload_hidden_layers = self._hidden_layers_from_payload(payload, self.cfg.hidden_layers)
+            if payload_hidden_layers != self.cfg.hidden_layers:
+                raise ValueError(
+                    f"Model hidden layers {payload_hidden_layers} do not match current hidden layers {self.cfg.hidden_layers}."
+                )
 
         state_dict = payload.get("state_dict", payload.get("policy_state_dict"))
         if state_dict is None:

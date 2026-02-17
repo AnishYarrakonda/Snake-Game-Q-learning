@@ -6,20 +6,24 @@ import numpy as np
 
 try:
     from .agent import SnakeDQNAgent
-    from .utils import TrainConfig, make_game, run_episode
+    from .utils import STATE_ENCODING_INTEGER, TrainConfig, make_game, run_episode
 except ImportError:
     from agent import SnakeDQNAgent
-    from utils import TrainConfig, make_game, run_episode
+    from utils import STATE_ENCODING_INTEGER, TrainConfig, make_game, run_episode
 
 
 def _cfg_from_metadata(meta: dict) -> TrainConfig:
     cfg_data = meta.get("cfg", {})
     hidden_layers_raw = meta.get("hidden_layers", cfg_data.get("hidden_layers", [256, 256, 128]))
     hidden_layers = tuple(int(width) for width in hidden_layers_raw)
+    state_encoding = str(meta.get("state_encoding", cfg_data.get("state_encoding", STATE_ENCODING_INTEGER)))
+    if state_encoding == "compact11":
+        state_encoding = STATE_ENCODING_INTEGER
     return TrainConfig(
         board_size=int(meta.get("board_size", cfg_data.get("board_size", 10))),
         apples=int(cfg_data.get("apples", 5)),
         hidden_layers=hidden_layers,
+        state_encoding=state_encoding,
     )
 
 

@@ -25,7 +25,9 @@ try:
         BOARD_SIZES,
         MAX_HIDDEN_LAYERS,
         MIN_HIDDEN_LAYERS,
+        STATE_ENCODING_BOARD,
         STATE_ENCODING_INTEGER,
+        SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
         clear_escape_cache,
         chunked_mean,
@@ -41,7 +43,9 @@ except ImportError:
         BOARD_SIZES,
         MAX_HIDDEN_LAYERS,
         MIN_HIDDEN_LAYERS,
+        STATE_ENCODING_BOARD,
         STATE_ENCODING_INTEGER,
+        SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
         clear_escape_cache,
         chunked_mean,
@@ -604,7 +608,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
     print_every = _prompt_int("Print stats every N episodes", 25, min_value=1)
     show_final_trend_plot = _prompt_bool("Show end trend plot when live plot is off", True)
 
-    load_raw = input("Model to load (.pt), blank for none: ").strip()
+    load_raw = input("Model/checkpoint to load (.pt or .ckpt), blank for none: ").strip()
     cfg = TrainConfig(
         board_size=board_size,
         apples=apples,
@@ -613,7 +617,7 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
         epsilon_start=epsilon_start,
         epsilon_min=epsilon_min,
         epsilon_decay_rate=epsilon_decay_rate,
-        state_encoding=STATE_ENCODING_INTEGER,
+        state_encoding=STATE_ENCODING_BOARD,
     )
     load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
     return cfg, load_path, show_plot, print_every, show_final_trend_plot
@@ -675,6 +679,11 @@ def run_offline_training_cli() -> None:
             cfg_data = metadata.get("cfg", {})
             hidden_layers_raw = metadata.get("hidden_layers", TrainConfig().hidden_layers)
             hidden_layers = tuple(int(width) for width in hidden_layers_raw)
+            state_encoding = str(metadata.get("state_encoding", cfg_data.get("state_encoding", STATE_ENCODING_BOARD)))
+            if state_encoding == "compact11":
+                state_encoding = STATE_ENCODING_INTEGER
+            if state_encoding not in SUPPORTED_STATE_ENCODINGS:
+                state_encoding = STATE_ENCODING_BOARD
             cfg = TrainConfig(
                 board_size=int(metadata.get("board_size", args.board_size)),
                 apples=int(cfg_data.get("apples", args.apples)),
@@ -683,7 +692,7 @@ def run_offline_training_cli() -> None:
                 epsilon_start=args.epsilon_start,
                 epsilon_min=args.epsilon_min,
                 epsilon_decay_rate=args.epsilon_decay_rate,
-                state_encoding=STATE_ENCODING_INTEGER,
+                state_encoding=state_encoding,
             )
         else:
             try:
@@ -698,7 +707,7 @@ def run_offline_training_cli() -> None:
                 epsilon_start=args.epsilon_start,
                 epsilon_min=args.epsilon_min,
                 epsilon_decay_rate=args.epsilon_decay_rate,
-                state_encoding=STATE_ENCODING_INTEGER,
+                state_encoding=STATE_ENCODING_BOARD,
             )
 
         load_path = args.load if args.load else None
