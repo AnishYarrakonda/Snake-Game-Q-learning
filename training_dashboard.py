@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import replace
+import json
 import os
 import queue
 import threading
@@ -33,6 +34,7 @@ try:
         TrainConfig,
         chunked_mean,
         default_model_path,
+        encode_state,
         make_game,
         parse_hidden_layer_widths,
         run_episode,
@@ -50,6 +52,7 @@ except ImportError:
         TrainConfig,
         chunked_mean,
         default_model_path,
+        encode_state,
         make_game,
         parse_hidden_layer_widths,
         run_episode,
@@ -77,6 +80,8 @@ class TrainingDashboard:
         self.cfg_lock = threading.Lock()
         self.runtime_cfg: TrainConfig | None = None
         self.active_training_immutable: tuple[int, int, int] | None = None  # board, apples, episodes
+        self.pending_visual_changes = False
+        self.pending_epsilon_changes = False
 
         self.cfg = TrainConfig()
         self.agent = SnakeDQNAgent(self.cfg)
@@ -95,6 +100,7 @@ class TrainingDashboard:
         left = tk.Frame(self.root, bg=self.BG_MAIN)
         left.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
         left.rowconfigure(2, weight=1)
+        left.rowconfigure(3, weight=0)
         left.columnconfigure(0, weight=1)
 
         right = tk.Frame(self.root, bg=self.BG_MAIN)
@@ -128,6 +134,15 @@ class TrainingDashboard:
         self.grid_color_var = tk.StringVar(value="#2a3340")
         self.board_bg_color_var = tk.StringVar(value="#1c2229")
         self.border_color_var = tk.StringVar(value="#7f8b99")
+        self.epsilon_start_var.trace_add("write", lambda *_: self._mark_epsilon_pending())
+        self.epsilon_min_var.trace_add("write", lambda *_: self._mark_epsilon_pending())
+        self.epsilon_decay_rate_var.trace_add("write", lambda *_: self._mark_epsilon_pending())
+        self.snake_head_color_var.trace_add("write", lambda *_: self._mark_visual_pending())
+        self.snake_body_color_var.trace_add("write", lambda *_: self._mark_visual_pending())
+        self.apple_color_var.trace_add("write", lambda *_: self._mark_visual_pending())
+        self.grid_color_var.trace_add("write", lambda *_: self._mark_visual_pending())
+        self.board_bg_color_var.trace_add("write", lambda *_: self._mark_visual_pending())
+        self.border_color_var.trace_add("write", lambda *_: self._mark_visual_pending())
 
         columns = tk.Frame(controls, bg=self.PANEL_BG)
         columns.pack(fill="x")
@@ -143,6 +158,9 @@ class TrainingDashboard:
         self._add_entry(left_col, "Eps start", self.epsilon_start_var)
         self._add_entry(left_col, "Eps min", self.epsilon_min_var)
         self._add_entry(left_col, "Eps decay rate", self.epsilon_decay_rate_var)
+        epsilon_btn_row = tk.Frame(left_col, bg=self.PANEL_BG)
+        epsilon_btn_row.pack(fill="x", pady=(2, 4))
+        self._make_btn(epsilon_btn_row, "Apply Epsilon", self._apply_epsilon_settings, w=12).pack(side="left", padx=2)
         self._add_entry(left_col, "Chunk episodes", self.print_every_var)
         self._add_info(right_col, "Policy", "Backend phase scheduler")
         self._add_info(right_col, "Gamma/N-step", "Automatic curriculum")
@@ -168,6 +186,10 @@ class TrainingDashboard:
         self._add_color_row(visuals, "Grid", self.grid_color_var)
         self._add_color_row(visuals, "Board bg", self.board_bg_color_var)
         self._add_color_row(visuals, "Border", self.border_color_var)
+        visual_btn_row = tk.Frame(visuals, bg=self.PANEL_ALT)
+        visual_btn_row.pack(fill="x", pady=(4, 0))
+        self._make_btn(visual_btn_row, "Apply Colors", self._apply_colors, w=12).pack(side="left", padx=2)
+        self._make_btn(visual_btn_row, "Reset Colors", self._reset_colors, w=12).pack(side="left", padx=2)
 
         btn_row = tk.Frame(controls, bg=self.PANEL_BG)
         btn_row.pack(fill="x", pady=(8, 0))
@@ -177,6 +199,20 @@ class TrainingDashboard:
         self._make_btn(btn_row, "Stop", self.stop_worker, w=10).pack(side="left", padx=2)
         self._make_btn(btn_row, "Load", self.load_model, w=10).pack(side="left", padx=2)
         self._make_btn(btn_row, "Save", self.save_model, w=10).pack(side="left", padx=2)
+        cfg_btn_row = tk.Frame(controls, bg=self.PANEL_BG)
+        cfg_btn_row.pack(fill="x", pady=(6, 0))
+        self._make_btn(cfg_btn_row, "Save Config", self.save_config, w=12).pack(side="left", padx=2)
+        self._make_btn(cfg_btn_row, "Load Config", self.load_config, w=12).pack(side="left", padx=2)
+        help_label = tk.Label(
+            controls,
+            text="Shortcuts: Ctrl+T Train, Ctrl+W Watch, Ctrl+S Stop, Ctrl+L Load, Ctrl+Shift+S Save, F5 Train",
+            fg=self.TEXT_MUTED,
+            bg=self.PANEL_BG,
+            font=("Helvetica", 8),
+            wraplength=560,
+            justify="left",
+        )
+        help_label.pack(anchor="w", pady=(6, 0))
 
         self.status_var = tk.StringVar(value="Ready")
         tk.Label(
@@ -190,6 +226,32 @@ class TrainingDashboard:
 
         self.canvas = tk.Canvas(left, bg=self.board_bg_color_var.get(), width=940, height=760, highlightthickness=0)
         self.canvas.grid(row=2, column=0, sticky="nsew")
+        state_frame = tk.LabelFrame(
+            left,
+            text="Current State Features (Last Step)",
+            bg=self.PANEL_BG,
+            fg=self.TEXT,
+            font=("Helvetica", 10, "bold"),
+            padx=8,
+            pady=6,
+            bd=1,
+            relief="groove",
+        )
+        state_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.state_text = tk.Text(
+            state_frame,
+            height=7,
+            width=90,
+            bg=self.PANEL_ALT,
+            fg=self.TEXT,
+            font=("Courier", 9),
+            wrap="none",
+            bd=0,
+            relief="flat",
+        )
+        self.state_text.pack(fill="both", expand=True)
+        self.state_text.insert("1.0", "State features will appear here during training/watch...")
+        self.state_text.config(state="disabled")
 
         fig = plt.Figure(figsize=(7, 7), dpi=100) #type: ignore
         self.ax_trend = fig.add_subplot(211)
@@ -198,6 +260,12 @@ class TrainingDashboard:
 
         self.plot_canvas = FigureCanvasTkAgg(fig, master=right)
         self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.root.bind("<Control-t>", lambda _e: self.start_training())
+        self.root.bind("<Control-w>", lambda _e: self.start_watch())
+        self.root.bind("<Control-s>", lambda _e: self.stop_worker())
+        self.root.bind("<Control-l>", lambda _e: self.load_model())
+        self.root.bind("<Control-Shift-S>", lambda _e: self.save_model())
+        self.root.bind("<F5>", lambda _e: self.start_training())
         self._apply_visual_settings()
 
     def _add_entry(self, parent: tk.Widget, label: str, var: tk.StringVar) -> None:
@@ -300,7 +368,7 @@ class TrainingDashboard:
         color = colorchooser.askcolor(color=var.get(), title="Choose color")[1]
         if color:
             var.set(color)
-            self._apply_visual_settings()
+            self.pending_visual_changes = True
 
     def _make_btn(self, parent: tk.Widget, text: str, command, w: int = 10) -> tk.Button:
         return tk.Button(
@@ -316,6 +384,62 @@ class TrainingDashboard:
             activeforeground="#0b1220",
             font=("Helvetica", 10, "bold"),
             cursor="hand2",
+        )
+
+    def _mark_visual_pending(self) -> None:
+        self.pending_visual_changes = True
+
+    def _mark_epsilon_pending(self) -> None:
+        self.pending_epsilon_changes = True
+
+    def _apply_colors(self) -> None:
+        try:
+            self._apply_visual_settings()
+            self.pending_visual_changes = False
+            self.status_var.set("Colors applied")
+        except ValueError as exc:
+            messagebox.showerror("Invalid Color", str(exc))
+
+    def _reset_colors(self) -> None:
+        self.snake_head_color_var.set("#45d483")
+        self.snake_body_color_var.set("#1fb86b")
+        self.apple_color_var.set("#ff5c74")
+        self.grid_color_var.set("#2a3340")
+        self.board_bg_color_var.set("#1c2229")
+        self.border_color_var.set("#7f8b99")
+        self._apply_visual_settings()
+        self.pending_visual_changes = False
+        self.status_var.set("Colors reset to defaults")
+
+    def _apply_epsilon_settings(self) -> None:
+        try:
+            epsilon_start = float(self.epsilon_start_var.get().strip())
+            epsilon_min = float(self.epsilon_min_var.get().strip())
+            epsilon_decay_rate = float(self.epsilon_decay_rate_var.get().strip())
+            if not (0.0 <= epsilon_min <= epsilon_start <= 1.0):
+                raise ValueError("Require 0 <= epsilon_min <= epsilon_start <= 1")
+            if epsilon_decay_rate <= 0.0:
+                raise ValueError("Epsilon decay rate must be > 0")
+        except ValueError as exc:
+            messagebox.showerror("Invalid Epsilon Settings", str(exc))
+            return
+
+        with self.cfg_lock:
+            base_cfg = self.runtime_cfg if self.runtime_cfg is not None else self.cfg
+            updated = replace(
+                base_cfg,
+                epsilon_start=epsilon_start,
+                epsilon_min=epsilon_min,
+                epsilon_decay_rate=epsilon_decay_rate,
+            )
+            self.cfg = updated
+            self.runtime_cfg = updated
+            self.agent.cfg = updated
+            if self.worker is None or not self.worker.is_alive():
+                self.agent.epsilon = epsilon_start
+        self.pending_epsilon_changes = False
+        self.status_var.set(
+            f"Epsilon applied: start={epsilon_start:.2f}, min={epsilon_min:.4f}, decay={epsilon_decay_rate:.2f}"
         )
 
     @staticmethod
@@ -466,6 +590,26 @@ class TrainingDashboard:
                 outline="",
             )
 
+    def _update_state_display(self, state: np.ndarray) -> None:
+        if len(state) != 16:
+            return
+
+        danger = state[0:4]
+        direction = state[4:8]
+        food = state[8:12]
+        safety = state[12:16]
+        lines = [
+            "Danger  [U D L R]: " + " ".join(f"{value:0.2f}" for value in danger),
+            "Dir     [U D L R]: " + " ".join(f"{value:0.2f}" for value in direction),
+            "Food    [U D L R]: " + " ".join(f"{value:0.2f}" for value in food),
+            "Safety  [U D L R]: " + " ".join(f"{value:0.2f}" for value in safety),
+            "Safety bars       : " + " ".join("#" * int(max(0.0, min(4.0, value)) * 4) for value in safety),
+        ]
+        self.state_text.config(state="normal")
+        self.state_text.delete("1.0", "end")
+        self.state_text.insert("1.0", "\n".join(lines))
+        self.state_text.config(state="disabled")
+
     def _update_plot(self) -> None:
         self.ax_trend.clear()
         self.ax_trend.set_title("Training Trend (Average per 10 Episodes)")
@@ -519,6 +663,9 @@ class TrainingDashboard:
 
                 if mtype == "step":
                     self._draw_snapshot(msg["snapshot"])
+                    state = msg.get("state")
+                    if state is not None:
+                        self._update_state_display(np.asarray(state, dtype=np.float32))
 
                 elif mtype == "episode":
                     score = float(msg["score"])
@@ -567,6 +714,12 @@ class TrainingDashboard:
         self._update_plot()
 
     def start_training(self) -> None:
+        if self.pending_epsilon_changes:
+            messagebox.showinfo("Pending Settings", "Epsilon settings changed. Click Apply Epsilon before training.")
+            return
+        if self.pending_visual_changes:
+            messagebox.showinfo("Pending Settings", "Color settings changed. Click Apply Colors before training.")
+            return
         try:
             cfg = self._read_cfg_from_ui()
         except ValueError as exc:
@@ -591,14 +744,17 @@ class TrainingDashboard:
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
                     if self.stop_event.is_set():
                         return
+                    current_cfg = self._get_runtime_cfg()
+                    state = encode_state(game, current_cfg)
                     self.msg_queue.put(
                         {
                             "type": "step",
                             "snapshot": {
-                                "size": cfg.board_size,
+                                "size": game.config.grid_size,
                                 "snake": list(game.snake),
                                 "apples": list(game.apples),
                             },
+                            "state": state.tolist(),
                         }
                     )
 
@@ -644,6 +800,12 @@ class TrainingDashboard:
         self._launch_worker(worker)
 
     def start_watch(self) -> None:
+        if self.pending_epsilon_changes:
+            messagebox.showinfo("Pending Settings", "Epsilon settings changed. Click Apply Epsilon before watch mode.")
+            return
+        if self.pending_visual_changes:
+            messagebox.showinfo("Pending Settings", "Color settings changed. Click Apply Colors before watch mode.")
+            return
         try:
             cfg = self._read_cfg_from_ui()
         except ValueError as exc:
@@ -667,14 +829,17 @@ class TrainingDashboard:
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
                     if self.stop_event.is_set():
                         return
+                    current_cfg = self._get_runtime_cfg()
+                    state = encode_state(game, current_cfg)
                     self.msg_queue.put(
                         {
                             "type": "step",
                             "snapshot": {
-                                "size": watch_cfg.board_size,
+                                "size": game.config.grid_size,
                                 "snake": list(game.snake),
                                 "apples": list(game.apples),
                             },
+                            "state": state.tolist(),
                         }
                     )
 
@@ -738,6 +903,108 @@ class TrainingDashboard:
             self.status_var.set(f"Saved model: {path}")
         except Exception as exc:
             messagebox.showerror("Save Failed", str(exc))
+
+    def save_config(self) -> None:
+        try:
+            cfg = self._read_cfg_from_ui()
+            print_every = int(self.print_every_var.get().strip())
+            runtime_cfg = self._get_runtime_cfg()
+        except ValueError as exc:
+            messagebox.showerror("Invalid Config", str(exc))
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save training config",
+            initialdir=MODELS_DIR,
+            defaultextension=".json",
+            filetypes=[("JSON config", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        config_dict = {
+            "board_size": cfg.board_size,
+            "apples": cfg.apples,
+            "episodes": runtime_cfg.episodes,
+            "hidden_layers": list(cfg.hidden_layers),
+            "epsilon_start": cfg.epsilon_start,
+            "epsilon_min": cfg.epsilon_min,
+            "epsilon_decay_rate": cfg.epsilon_decay_rate,
+            "food_reward_base": cfg.food_reward_base,
+            "food_reward_min": cfg.food_reward_min,
+            "survival_reward_start": cfg.survival_reward_start,
+            "survival_reward_end": cfg.survival_reward_end,
+            "death_reward": cfg.death_reward,
+            "terminal_bonus_alpha_start": cfg.terminal_bonus_alpha_start,
+            "terminal_bonus_alpha_end": cfg.terminal_bonus_alpha_end,
+            "terminal_bonus_power": cfg.terminal_bonus_power,
+            "anim_delay_ms": int(round(cfg.step_delay * 1000.0)),
+            "chunk_episodes": print_every,
+            "colors": {
+                "snake_head": self.snake_head_color_var.get().strip(),
+                "snake_body": self.snake_body_color_var.get().strip(),
+                "apple": self.apple_color_var.get().strip(),
+                "grid": self.grid_color_var.get().strip(),
+                "board_bg": self.board_bg_color_var.get().strip(),
+                "border": self.border_color_var.get().strip(),
+            },
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(config_dict, handle, indent=2)
+            self.status_var.set(f"Config saved: {path}")
+        except Exception as exc:
+            messagebox.showerror("Save Failed", str(exc))
+
+    def load_config(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Load training config",
+            initialdir=MODELS_DIR,
+            filetypes=[("JSON config", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                config_dict = json.load(handle)
+
+            self.board_var.set(str(config_dict.get("board_size", self.cfg.board_size)))
+            self.apple_var.set(str(config_dict.get("apples", self.cfg.apples)))
+            hidden_layers_raw = config_dict.get("hidden_layers", list(self.cfg.hidden_layers))
+            hidden_layers = tuple(int(width) for width in hidden_layers_raw)
+            self.hidden_layer_count_var.set(str(len(hidden_layers)))
+            self.neurons_var.set(self._format_hidden_layers_for_ui(hidden_layers))
+            self.epsilon_start_var.set(f"{float(config_dict.get('epsilon_start', self.cfg.epsilon_start)):.2f}")
+            self.epsilon_min_var.set(f"{float(config_dict.get('epsilon_min', self.cfg.epsilon_min)):.4f}")
+            self.epsilon_decay_rate_var.set(
+                f"{float(config_dict.get('epsilon_decay_rate', self.cfg.epsilon_decay_rate)):.2f}"
+            )
+            self.anim_delay_var.set(float(config_dict.get("anim_delay_ms", int(round(self.cfg.step_delay * 1000.0)))))
+            self.print_every_var.set(str(int(config_dict.get("chunk_episodes", 25))))
+
+            colors = config_dict.get("colors", {})
+            self.snake_head_color_var.set(str(colors.get("snake_head", self.snake_head_color_var.get())))
+            self.snake_body_color_var.set(str(colors.get("snake_body", self.snake_body_color_var.get())))
+            self.apple_color_var.set(str(colors.get("apple", self.apple_color_var.get())))
+            self.grid_color_var.set(str(colors.get("grid", self.grid_color_var.get())))
+            self.board_bg_color_var.set(str(colors.get("board_bg", self.board_bg_color_var.get())))
+            self.border_color_var.set(str(colors.get("border", self.border_color_var.get())))
+            self._apply_colors()
+            self._apply_epsilon_settings()
+
+            cfg = self._read_cfg_from_ui()
+            episodes_raw = config_dict.get("episodes", cfg.episodes)
+            try:
+                episodes = max(1, int(episodes_raw))
+            except (TypeError, ValueError):
+                episodes = cfg.episodes
+            cfg = replace(cfg, episodes=episodes)
+            self._sync_agent_to_cfg(cfg)
+            self._set_runtime_cfg(cfg)
+            self.status_var.set(f"Config loaded: {path}")
+        except Exception as exc:
+            messagebox.showerror("Load Failed", str(exc))
 
     def load_model(self) -> None:
         path = filedialog.askopenfilename(

@@ -32,7 +32,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-_COLLISION_CACHE: dict[tuple[int, int, int, int, tuple[tuple[int, int], ...]], dict[str, bool]] = {}
+_ESCAPE_CACHE: dict[tuple[int, int, int, frozenset[tuple[int, int]]], int] = {}
 
 
 def _parse_positive_int(raw: str, label: str) -> int:
@@ -104,7 +104,7 @@ class TrainConfig:
     gamma: float = 0.96
     lr: float = 0.001
     epsilon_start: float = 1.0
-    epsilon_min: float = 0.01
+    epsilon_min: float = 0.05
     epsilon_decay: float = 0.994
     batch_size: int = 128
     memory_size: int = 50_000
@@ -120,7 +120,7 @@ class TrainConfig:
     lr_end: float = 2e-4
     gamma_start: float = 0.96
     gamma_end: float = 0.99
-    epsilon_decay_rate: float = 10.0
+    epsilon_decay_rate: float = 8.0
     batch_size_start: int = 64
     batch_size_end: int = 128
     food_reward_base: float = 1.5
@@ -214,29 +214,13 @@ def nearest_apple_position(game: SnakeGame) -> tuple[int, int]:
 
 
 def _get_collision_info(game: SnakeGame, hx: int, hy: int) -> dict[str, bool]:
-    """
-    Cache immediate collision checks for compact state encoding.
-    Uses a short snake body snapshot to avoid stale cache hits.
-    """
-    cache_key = (
-        game.config.grid_size,
-        hx,
-        hy,
-        len(game.snake),
-        tuple(list(game.snake)[:8]),
-    )
-    if len(game.snake) < 10 and cache_key in _COLLISION_CACHE:
-        return _COLLISION_CACHE[cache_key]
-
-    collisions = {
+    """Get immediate collision status for all 4 directions."""
+    return {
         "up": _is_collision(game, hx, hy - 1),
         "down": _is_collision(game, hx, hy + 1),
         "left": _is_collision(game, hx - 1, hy),
         "right": _is_collision(game, hx + 1, hy),
     }
-    if len(game.snake) < 10:
-        _COLLISION_CACHE[cache_key] = collisions
-    return collisions
 
 
 def encode_integer_state(game: SnakeGame) -> np.ndarray:
@@ -272,19 +256,53 @@ def encode_integer_state(game: SnakeGame) -> np.ndarray:
 
 
 def _count_escape_routes(game: SnakeGame, x: int, y: int, depth: int = 2) -> int:
-    """Count route options recursively to estimate local safety."""
+    """
+    Fast iterative BFS to count reachable cells within depth steps.
+    Caches results using snake body snapshot for efficiency.
+    """
     size = game.config.grid_size
+
     if x < 0 or x >= size or y < 0 or y >= size:
         return 0
     if (x, y) in game.snake_set and (x, y) != game.snake[0]:
         return 0
-    if depth == 0:
-        return 1
 
-    routes = 0
-    for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
-        routes += _count_escape_routes(game, x + dx, y + dy, depth - 1)
-    return routes
+    body_key = frozenset(list(game.snake)[:10])
+    cache_key = (x, y, depth, body_key)
+    if cache_key in _ESCAPE_CACHE:
+        return _ESCAPE_CACHE[cache_key]
+
+    visited = {(x, y)}
+    queue: list[tuple[int, int, int]] = [(x, y, 0)]
+    head = 0
+
+    while head < len(queue):
+        cx, cy, d = queue[head]
+        head += 1
+
+        if d >= depth:
+            continue
+
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            nx, ny = cx + dx, cy + dy
+            if nx < 0 or nx >= size or ny < 0 or ny >= size:
+                continue
+            if (nx, ny) in visited:
+                continue
+            if (nx, ny) in game.snake_set and (nx, ny) != game.snake[0]:
+                continue
+            visited.add((nx, ny))
+            queue.append((nx, ny, d + 1))
+
+    result = len(visited)
+    if len(_ESCAPE_CACHE) < 5000:
+        _ESCAPE_CACHE[cache_key] = result
+    return result
+
+
+def clear_escape_cache() -> None:
+    """Clear escape route cache to free memory."""
+    _ESCAPE_CACHE.clear()
 
 
 def encode_integer_state_v2(game: SnakeGame) -> np.ndarray:
@@ -353,7 +371,12 @@ def episode_dynamics(episode: int, cfg: TrainConfig) -> EpisodeDynamics:
     # Smooth schedules only: no abrupt switches in gamma/lr/epsilon/weights.
     gamma = cfg.gamma_start + (cfg.gamma_end - cfg.gamma_start) * (progress**0.5)
     lr = cfg.lr_start * (1.0 - 0.6 * progress)
-    epsilon = max(cfg.epsilon_min, cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * progress))
+    if progress < 0.5:
+        epsilon = max(cfg.epsilon_min, cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * progress))
+    else:
+        mid_epsilon = cfg.epsilon_start * math.exp(-cfg.epsilon_decay_rate * 0.5)
+        remaining_decay = (mid_epsilon - cfg.epsilon_min) * (1.0 - (progress - 0.5) * 2.0)
+        epsilon = max(cfg.epsilon_min, mid_epsilon - remaining_decay * 0.5)
     batch_size = int(round(cfg.batch_size_start + (cfg.batch_size_end - cfg.batch_size_start) * (progress**2)))
     batch_size = max(cfg.batch_size_start, min(cfg.batch_size_end, batch_size))
 

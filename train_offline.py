@@ -27,6 +27,7 @@ try:
         MIN_HIDDEN_LAYERS,
         STATE_ENCODING_INTEGER,
         TrainConfig,
+        clear_escape_cache,
         chunked_mean,
         default_model_path,
         make_game,
@@ -42,6 +43,7 @@ except ImportError:
         MIN_HIDDEN_LAYERS,
         STATE_ENCODING_INTEGER,
         TrainConfig,
+        clear_escape_cache,
         chunked_mean,
         default_model_path,
         make_game,
@@ -106,6 +108,15 @@ def _periodic_checkpoint_path(base_path: str, episode: int) -> str:
     return f"{root}_{episode}{ext}"
 
 
+def _print_progress_bar(episode: int, total: int, bar_length: int = 50) -> None:
+    """Print a compact progress bar in the terminal."""
+    total_safe = max(1, int(total))
+    percent = min(1.0, max(0.0, episode / total_safe))
+    filled = int(bar_length * percent)
+    bar = "#" * filled + "-" * (bar_length - filled)
+    print(f"\rProgress: |{bar}| {episode}/{total_safe} ({percent * 100:.1f}%)", end="", flush=True)
+
+
 def train_offline(
     cfg: TrainConfig,
     load_path: str | None = None,
@@ -117,6 +128,8 @@ def train_offline(
     show_plot: bool = True,
     print_every: int = 25,
     show_final_trend_plot: bool = True,
+    early_stop_patience: int = 500,
+    early_stop_threshold: float = 0.02,
     stop_flag: threading.Event | None = None,
     episode_callback: Callable[[int, float, float, float], None] | None = None,
 ) -> tuple[SnakeDQNAgent, list[float], list[float]]:
@@ -163,6 +176,7 @@ def train_offline(
     recent_td_error: deque[float] = deque(maxlen=log_chunk_size)
     recent_food_r: deque[float] = deque(maxlen=log_chunk_size)
     recent_survival_r: deque[float] = deque(maxlen=log_chunk_size)
+    recent_safety_bonus: deque[float] = deque(maxlen=log_chunk_size)
     recent_terminal_bonus: deque[float] = deque(maxlen=log_chunk_size)
     recent_loss: deque[float] = deque(maxlen=log_chunk_size)
     recent_total_reward: deque[float] = deque(maxlen=log_chunk_size)
@@ -175,6 +189,9 @@ def train_offline(
     checkpoint_seed_path = checkpoint_base_path or save_path or resume_path or _default_checkpoint_path(cfg)
     last_completed_episode = start_episode - 1
     last_periodic_checkpoint_path: str | None = None
+    best_rolling_avg = 0.0
+    patience_counter = 0
+    early_stop_triggered = False
 
     print(f"\nUsing device: {agent.device}\n")
 
@@ -193,6 +210,7 @@ def train_offline(
         f"{'TDerr':>9}"
         f"{'FoodR':>9}"
         f"{'SurvR':>9}"
+        f"{'SafeB':>9}"
         f"{'Bonus':>9}"
         f"{'Loss':>10}"
         f"{'TotR':>9}"
@@ -214,6 +232,9 @@ def train_offline(
     for episode in range(start_episode, cfg.episodes + 1):
         if stop_flag and stop_flag.is_set():
             break
+        if episode % 100 == 0:
+            clear_escape_cache()
+        _print_progress_bar(episode, cfg.episodes)
 
         score, total_reward, steps_taken, episode_stats = run_episode(
             agent,
@@ -232,6 +253,7 @@ def train_offline(
         recent_td_error.append(float(episode_stats["td_error_mean"]))
         recent_food_r.append(float(episode_stats["avg_food_reward"]))
         recent_survival_r.append(float(episode_stats["avg_survival_reward"]))
+        recent_safety_bonus.append(float(episode_stats["avg_safety_bonus"]))
         recent_terminal_bonus.append(float(episode_stats["terminal_bonus"]))
         recent_loss.append(float(episode_stats["loss"]))
         recent_total_reward.append(float(total_reward))
@@ -240,6 +262,19 @@ def train_offline(
         avg10_scores.append(avg10)
         agent.best_score = max(agent.best_score, float(score))
         last_completed_episode = episode
+        if early_stop_patience > 0 and episode % 25 == 0 and len(rolling_scores_500) >= 100:
+            current_avg = float(np.mean(rolling_scores_500))
+            if current_avg > best_rolling_avg + early_stop_threshold:
+                best_rolling_avg = current_avg
+                patience_counter = 0
+            else:
+                patience_counter += 25
+            if patience_counter >= early_stop_patience:
+                early_stop_triggered = True
+                print()
+                print(f"Early stopping at episode {episode}: no improvement for {patience_counter} episodes")
+                print(f"Best rolling average: {best_rolling_avg:.2f}")
+                break
 
         if episode_callback:
             episode_callback(episode, float(score), avg10, float(agent.epsilon))
@@ -251,6 +286,7 @@ def train_offline(
             plt.pause(0.001)
 
         if episode % log_chunk_size == 0 or episode == cfg.episodes:
+            print()
             total_elapsed = time.perf_counter() - train_start_t
             chunk_elapsed = time.perf_counter() - chunk_start_t
             avg_chunk = float(np.mean(recent_chunk))
@@ -262,6 +298,7 @@ def train_offline(
             avg_td = float(np.mean(recent_td_error)) if recent_td_error else 0.0
             avg_food = float(np.mean(recent_food_r)) if recent_food_r else 0.0
             avg_survival = float(np.mean(recent_survival_r)) if recent_survival_r else 0.0
+            avg_safety_bonus = float(np.mean(recent_safety_bonus)) if recent_safety_bonus else 0.0
             avg_bonus = float(np.mean(recent_terminal_bonus)) if recent_terminal_bonus else 0.0
             avg_loss = float(np.mean(recent_loss)) if recent_loss else 0.0
             avg_reward = float(np.mean(recent_total_reward)) if recent_total_reward else 0.0
@@ -287,6 +324,7 @@ def train_offline(
                 f"{avg_td:>9.3f}"
                 f"{avg_food:>9.3f}"
                 f"{avg_survival:>9.3f}"
+                f"{avg_safety_bonus:>9.3f}"
                 f"{avg_bonus:>9.3f}"
                 f"{avg_loss:>10.4f}"
                 f"{avg_reward:>9.3f}"
@@ -298,10 +336,13 @@ def train_offline(
             chunk_start_t = time.perf_counter()
 
         if checkpoint_every > 0 and (episode % checkpoint_every == 0):
+            print()
             periodic_path = _periodic_checkpoint_path(checkpoint_seed_path, episode)
             agent.save_checkpoint(periodic_path, episode_index=episode, replay_buffer=agent.memory)
             last_periodic_checkpoint_path = periodic_path
             print(f"Saved checkpoint: {periodic_path}")
+
+    print()
 
     if save_path:
         if (
@@ -347,6 +388,9 @@ def train_offline(
         plt.legend(loc="upper left")
         plt.tight_layout()
         plt.show()
+
+    if early_stop_triggered:
+        print(f"Training stopped early at episode {last_completed_episode}/{cfg.episodes}")
 
     return agent, scores, avg10_scores
 
@@ -408,6 +452,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=25,
         help="Print training stats every N episodes (also used for chunk average/median trend).",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=500,
+        help="Stop after this many no-improvement episodes (0 disables early stopping).",
+    )
+    parser.add_argument(
+        "--early-stop-threshold",
+        type=float,
+        default=0.02,
+        help="Minimum rolling-average improvement to reset early-stop patience.",
     )
     parser.add_argument("--no-plot", action="store_true", help="Disable matplotlib live plot")
     parser.add_argument(
@@ -583,6 +639,10 @@ def run_offline_training_cli() -> None:
         raise SystemExit("Use only one of --resume or --load.")
     if args.save_checkpoint_every < 0:
         raise SystemExit("--save-checkpoint-every must be >= 0.")
+    if args.early_stop_patience < 0:
+        raise SystemExit("--early-stop-patience must be >= 0.")
+    if args.early_stop_threshold < 0.0:
+        raise SystemExit("--early-stop-threshold must be >= 0.")
     if not (0.0 <= args.epsilon_min <= args.epsilon_start <= 1.0):
         raise SystemExit("Require 0 <= --epsilon-min <= --epsilon-start <= 1.")
     if args.epsilon_decay_rate <= 0.0:
@@ -648,6 +708,8 @@ def run_offline_training_cli() -> None:
         show_plot=show_plot,
         print_every=print_every,
         show_final_trend_plot=show_final_trend_plot,
+        early_stop_patience=args.early_stop_patience,
+        early_stop_threshold=args.early_stop_threshold,
     )
 
     if interactive and not save_path:

@@ -59,6 +59,7 @@ class SnakeApp:
         self.config = SnakeConfig()
         self.game = SnakeGame(self.config)
         self.after_id: str | None = None  # Tkinter timer id for the game loop
+        self.settings_dirty = False
 
         self._build_layout()
         self._bind_keys()
@@ -203,6 +204,7 @@ class SnakeApp:
             font=("Helvetica", self._s(10)),
         )
         spin.pack(side="right")
+        var.trace_add("write", lambda *_: self._mark_settings_dirty())
 
     def _add_labeled_dropdown(self, parent: tk.Widget, label: str, var: tk.StringVar, options: list[str]) -> None:
         """Render a labeled dropdown with fixed allowed choices."""
@@ -236,23 +238,24 @@ class SnakeApp:
             font=("Helvetica", self._s(10)),
         )
         dropdown.pack(side="right")
+        var.trace_add("write", lambda *_: self._mark_settings_dirty())
 
     def _build_buttons(self) -> None:
         """Action buttons for start/pause/reset/apply."""
         frame = tk.Frame(self.sidebar, bg=self.SIDEBAR_BG)
         frame.pack(fill="x", padx=self._s(16), pady=(0, self._s(10)))
 
+        self.apply_btn = self._button(frame, "Apply Settings", self.apply_settings)
+        self.apply_btn.pack(fill="x", pady=self._s(6))
+
         self.start_btn = self._button(frame, "Start", self.start_game)
-        self.start_btn.pack(fill="x", pady=self._s(4))
+        self.start_btn.pack(fill="x", pady=self._s(2))
 
         self.pause_btn = self._button(frame, "Pause", self.toggle_pause)
-        self.pause_btn.pack(fill="x", pady=self._s(4))
+        self.pause_btn.pack(fill="x", pady=self._s(2))
 
         self.reset_btn = self._button(frame, "Reset", self.reset_game)
-        self.reset_btn.pack(fill="x", pady=self._s(4))
-
-        self.apply_btn = self._button(frame, "Apply Settings", self.apply_settings)
-        self.apply_btn.pack(fill="x", pady=self._s(4))
+        self.reset_btn.pack(fill="x", pady=self._s(2))
 
         footer = tk.Label(
             self.sidebar,
@@ -281,7 +284,7 @@ class SnakeApp:
         )
 
     def _bind_keys(self) -> None:
-        """Bind movement controls and spacebar pause."""
+        """Bind movement controls and keyboard shortcuts."""
         self.root.bind("<Up>", lambda _e: self.game.queue_direction("up"))
         self.root.bind("<Down>", lambda _e: self.game.queue_direction("down"))
         self.root.bind("<Left>", lambda _e: self.game.queue_direction("left"))
@@ -291,6 +294,15 @@ class SnakeApp:
         self.root.bind("a", lambda _e: self.game.queue_direction("left"))
         self.root.bind("d", lambda _e: self.game.queue_direction("right"))
         self.root.bind("<space>", lambda _e: self.toggle_pause())
+        self.root.bind("<Return>", lambda _e: self.start_game())
+        self.root.bind("<Escape>", lambda _e: self.toggle_pause())
+        self.root.bind("r", lambda _e: self.reset_game())
+
+    def _mark_settings_dirty(self) -> None:
+        """Mark settings as changed but not applied."""
+        if not self.settings_dirty:
+            self.settings_dirty = True
+            self.state_var.set("State: Settings changed (click Apply)")
 
     def _parse_int(self, raw: str, low: int, high: int, label: str) -> int:
         """Parse and clamp-check integer settings with a clear error message."""
@@ -325,6 +337,7 @@ class SnakeApp:
         self.game = SnakeGame(self.config)
         self._cancel_loop()
         self._apply_canvas_size()
+        self.settings_dirty = False
         self.state_var.set("State: Ready")
         self.draw()
 
