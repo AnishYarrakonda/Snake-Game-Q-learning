@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import threading
+import time
 from typing import Callable
 
 # Keep matplotlib cache local for environments without writable home config.
@@ -179,6 +180,8 @@ def train_offline(
 
     header = (
         f"{'Episodes':<18}"
+        f"{'TotSec':>9}"
+        f"{'ChunkSec':>10}"
         f"{'Last':>6}"
         f"{'Avg':>8}"
         f"{'Med':>8}"
@@ -205,6 +208,8 @@ def train_offline(
         fig.subplots_adjust(hspace=0.35)
 
     episode_game = make_game(cfg)
+    train_start_t = time.perf_counter()
+    chunk_start_t = train_start_t
 
     for episode in range(start_episode, cfg.episodes + 1):
         if stop_flag and stop_flag.is_set():
@@ -246,6 +251,8 @@ def train_offline(
             plt.pause(0.001)
 
         if episode % log_chunk_size == 0 or episode == cfg.episodes:
+            total_elapsed = time.perf_counter() - train_start_t
+            chunk_elapsed = time.perf_counter() - chunk_start_t
             avg_chunk = float(np.mean(recent_chunk))
             median_chunk = float(np.median(recent_chunk))
             max_chunk = float(np.max(recent_chunk))
@@ -267,6 +274,8 @@ def train_offline(
             
             row = (
                 f"{episode_label:<18}"
+                f"{total_elapsed:>9.1f}"
+                f"{chunk_elapsed:>10.1f}"
                 f"{score:>6.0f}"
                 f"{avg_chunk:>8.2f}"
                 f"{median_chunk:>8.2f}"
@@ -286,6 +295,7 @@ def train_offline(
 
             print(row)
             print()
+            chunk_start_t = time.perf_counter()
 
         if checkpoint_every > 0 and (episode % checkpoint_every == 0):
             periodic_path = _periodic_checkpoint_path(checkpoint_seed_path, episode)
@@ -348,6 +358,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--board-size", type=int, default=defaults.board_size, choices=BOARD_SIZES)
     parser.add_argument("--apples", type=int, default=defaults.apples, choices=APPLE_CHOICES)
     parser.add_argument("--episodes", type=int, default=defaults.episodes)
+    parser.add_argument("--epsilon-start", type=float, default=defaults.epsilon_start)
+    parser.add_argument("--epsilon-min", type=float, default=defaults.epsilon_min)
+    parser.add_argument("--epsilon-decay-rate", type=float, default=defaults.epsilon_decay_rate)
     parser.add_argument(
         "--hidden-layers",
         type=int,
@@ -520,6 +533,12 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
     board_size = _prompt_int("Board size", default_cfg.board_size, choices=BOARD_SIZES)
     apples = _prompt_int("Apples", default_cfg.apples, choices=APPLE_CHOICES)
     hidden_layers = _prompt_hidden_layers(default_cfg.hidden_layers)
+    epsilon_start = _prompt_float("Epsilon start", default_cfg.epsilon_start, min_value=0.0, max_value=1.0)
+    epsilon_min = _prompt_float("Epsilon min", default_cfg.epsilon_min, min_value=0.0, max_value=1.0)
+    epsilon_decay_rate = _prompt_float("Epsilon decay rate", default_cfg.epsilon_decay_rate, min_value=1e-6)
+    if epsilon_min > epsilon_start:
+        print("Epsilon min cannot exceed epsilon start; swapping values.")
+        epsilon_start, epsilon_min = epsilon_min, epsilon_start
     show_plot = _prompt_bool("Show live matplotlib plot", False)
     print_every = _prompt_int("Print stats every N episodes", 25, min_value=1)
     show_final_trend_plot = _prompt_bool("Show end trend plot when live plot is off", True)
@@ -529,6 +548,9 @@ def prompt_train_config() -> tuple[TrainConfig, str | None, bool, int, bool]:
         board_size=board_size,
         apples=apples,
         hidden_layers=hidden_layers,
+        epsilon_start=epsilon_start,
+        epsilon_min=epsilon_min,
+        epsilon_decay_rate=epsilon_decay_rate,
         state_encoding=STATE_ENCODING_INTEGER,
     )
     load_path = None if load_raw == "" or load_raw.lower() == "default" else load_raw
@@ -561,6 +583,10 @@ def run_offline_training_cli() -> None:
         raise SystemExit("Use only one of --resume or --load.")
     if args.save_checkpoint_every < 0:
         raise SystemExit("--save-checkpoint-every must be >= 0.")
+    if not (0.0 <= args.epsilon_min <= args.epsilon_start <= 1.0):
+        raise SystemExit("Require 0 <= --epsilon-min <= --epsilon-start <= 1.")
+    if args.epsilon_decay_rate <= 0.0:
+        raise SystemExit("--epsilon-decay-rate must be > 0.")
 
     if interactive:
         cfg, load_path, show_plot, print_every, show_final_trend_plot = prompt_train_config()
@@ -581,6 +607,9 @@ def run_offline_training_cli() -> None:
                 apples=int(cfg_data.get("apples", args.apples)),
                 episodes=args.episodes,
                 hidden_layers=hidden_layers,
+                epsilon_start=args.epsilon_start,
+                epsilon_min=args.epsilon_min,
+                epsilon_decay_rate=args.epsilon_decay_rate,
                 state_encoding=STATE_ENCODING_INTEGER,
             )
         else:
@@ -593,6 +622,9 @@ def run_offline_training_cli() -> None:
                 apples=args.apples,
                 episodes=args.episodes,
                 hidden_layers=hidden_layers,
+                epsilon_start=args.epsilon_start,
+                epsilon_min=args.epsilon_min,
+                epsilon_decay_rate=args.epsilon_decay_rate,
                 state_encoding=STATE_ENCODING_INTEGER,
             )
 

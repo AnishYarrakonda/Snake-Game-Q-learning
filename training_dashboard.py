@@ -6,6 +6,7 @@ from dataclasses import replace
 import os
 import queue
 import threading
+import time
 from typing import Callable
 
 # Keep matplotlib cache local for environments without writable home config.
@@ -116,6 +117,10 @@ class TrainingDashboard:
         self.apple_var = tk.StringVar(value=str(self.cfg.apples))
         self.hidden_layer_count_var = tk.StringVar(value=str(len(self.cfg.hidden_layers)))
         self.neurons_var = tk.StringVar(value=self._format_hidden_layers_for_ui(self.cfg.hidden_layers))
+        self.epsilon_start_var = tk.StringVar(value=f"{self.cfg.epsilon_start:.2f}")
+        self.epsilon_min_var = tk.StringVar(value=f"{self.cfg.epsilon_min:.4f}")
+        self.epsilon_decay_rate_var = tk.StringVar(value=f"{self.cfg.epsilon_decay_rate:.2f}")
+        self.print_every_var = tk.StringVar(value="25")
         self.anim_delay_var = tk.DoubleVar(value=0.0)
         self.snake_head_color_var = tk.StringVar(value="#45d483")
         self.snake_body_color_var = tk.StringVar(value="#1fb86b")
@@ -135,6 +140,10 @@ class TrainingDashboard:
         self._add_dropdown(left_col, "Apples", self.apple_var, [str(v) for v in APPLE_CHOICES])
         self._add_entry(left_col, "Hidden layers", self.hidden_layer_count_var)
         self._add_entry(left_col, "Neurons/layer", self.neurons_var)
+        self._add_entry(left_col, "Eps start", self.epsilon_start_var)
+        self._add_entry(left_col, "Eps min", self.epsilon_min_var)
+        self._add_entry(left_col, "Eps decay rate", self.epsilon_decay_rate_var)
+        self._add_entry(left_col, "Chunk episodes", self.print_every_var)
         self._add_info(right_col, "Policy", "Backend phase scheduler")
         self._add_info(right_col, "Gamma/N-step", "Automatic curriculum")
         self._add_info(right_col, "Rewards/LR/Epsilon", "Automatic curriculum")
@@ -355,6 +364,13 @@ class TrainingDashboard:
             anim_delay_ms = float(self.anim_delay_var.get())
         except (TypeError, ValueError):
             raise ValueError("Animation delay must be a number.")
+        try:
+            epsilon_start = float(self.epsilon_start_var.get().strip())
+            epsilon_min = float(self.epsilon_min_var.get().strip())
+            epsilon_decay_rate = float(self.epsilon_decay_rate_var.get().strip())
+            print_every = int(self.print_every_var.get().strip())
+        except ValueError:
+            raise ValueError("Epsilon settings and chunk episodes must be numeric.")
 
         if board_size not in BOARD_SIZES:
             raise ValueError("Board size must be 10, 20, 30, or 40.")
@@ -362,12 +378,21 @@ class TrainingDashboard:
             raise ValueError("Apples must be 1, 3, 5, or 10.")
         if not (0 <= anim_delay_ms <= 1000):
             raise ValueError("Animation delay must be between 0 and 1000 ms.")
+        if not (0.0 <= epsilon_min <= epsilon_start <= 1.0):
+            raise ValueError("Require 0 <= epsilon_min <= epsilon_start <= 1.")
+        if epsilon_decay_rate <= 0.0:
+            raise ValueError("Epsilon decay rate must be > 0.")
+        if print_every <= 0:
+            raise ValueError("Chunk episodes must be > 0.")
 
         return replace(
             TrainConfig(),
             board_size=board_size,
             apples=apples,
             hidden_layers=hidden_layers,
+            epsilon_start=epsilon_start,
+            epsilon_min=epsilon_min,
+            epsilon_decay_rate=epsilon_decay_rate,
             state_encoding=STATE_ENCODING_INTEGER,
             step_delay=anim_delay_ms / 1000.0,
         )
@@ -501,11 +526,14 @@ class TrainingDashboard:
                     epsilon = float(msg["epsilon"])
                     episode = int(msg["episode"])
                     total = int(msg["total"])
+                    elapsed_total = float(msg.get("elapsed_total_sec", 0.0))
+                    elapsed_chunk = float(msg.get("elapsed_chunk_sec", 0.0))
 
                     self.scores.append(score)
                     self._update_plot()
                     self.status_var.set(
-                        f"Episode {episode}/{total} | Length: {score:.0f} | Avg10: {avg:.2f} | Epsilon: {epsilon:.4f}"
+                        f"Episode {episode}/{total} | Length: {score:.0f} | Avg10: {avg:.2f} | "
+                        f"Epsilon: {epsilon:.4f} | Total: {elapsed_total:.1f}s | Chunk: {elapsed_chunk:.1f}s"
                     )
 
                 elif mtype == "done":
@@ -555,7 +583,10 @@ class TrainingDashboard:
         def worker() -> None:
             try:
                 recent_scores: deque[float] = deque(maxlen=10)
+                log_chunk_size = max(1, int(self.print_every_var.get().strip()))
                 episode_game = make_game(cfg)
+                train_start_t = time.perf_counter()
+                chunk_start_t = train_start_t
 
                 def on_step(game: SnakeGame, _step: int, _length: int, _eps: float) -> None:
                     if self.stop_event.is_set():
@@ -598,8 +629,12 @@ class TrainingDashboard:
                             "score": score,
                             "avg": avg,
                             "epsilon": self.agent.epsilon,
+                            "elapsed_total_sec": time.perf_counter() - train_start_t,
+                            "elapsed_chunk_sec": time.perf_counter() - chunk_start_t,
                         }
                     )
+                    if episode % log_chunk_size == 0:
+                        chunk_start_t = time.perf_counter()
 
                 done_text = "Training stopped" if self.stop_event.is_set() else "Training complete"
                 self.msg_queue.put({"type": "done", "text": done_text, "ask_save": True})
