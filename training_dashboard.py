@@ -87,14 +87,19 @@ class TrainingDashboard:
         self.root.after(80, self._poll_queue)
 
     def _build_ui(self) -> None:
-        self.root.columnconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=0, minsize=560)
+        self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
 
         left = tk.Frame(self.root, bg=self.BG_MAIN)
-        left.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
         left.rowconfigure(2, weight=1)
-        left.rowconfigure(3, weight=0)
         left.columnconfigure(0, weight=1)
+
+        right = tk.Frame(self.root, bg=self.BG_MAIN)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        right.rowconfigure(0, weight=1)
+        right.columnconfigure(0, weight=1)
 
         controls = tk.LabelFrame(
             left,
@@ -199,7 +204,7 @@ class TrainingDashboard:
             fg=self.TEXT_MUTED,
             bg=self.PANEL_BG,
             font=("Helvetica", 8),
-            wraplength=560,
+            wraplength=500,
             justify="left",
         )
         help_label.pack(anchor="w", pady=(6, 0))
@@ -212,10 +217,32 @@ class TrainingDashboard:
             bg=self.BG_MAIN,
             font=("Helvetica", 12, "bold"),
             anchor="w",
-        ).grid(row=1, column=0, sticky="ew", pady=(10, 8))
+        ).grid(row=1, column=0, sticky="ew", pady=(10, 8), padx=2)
 
-        self.canvas = tk.Canvas(left, bg=self.board_bg_color_var.get(), width=1400, height=900, highlightthickness=0)
-        self.canvas.grid(row=2, column=0, sticky="nsew")
+        board_frame = tk.LabelFrame(
+            right,
+            text="Live Snake Board",
+            bg=self.PANEL_BG,
+            fg=self.TEXT,
+            font=("Helvetica", 11, "bold"),
+            padx=8,
+            pady=8,
+            bd=1,
+            relief="groove",
+        )
+        board_frame.grid(row=0, column=0, sticky="nsew")
+        board_frame.rowconfigure(0, weight=1)
+        board_frame.columnconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(
+            board_frame,
+            bg=self.board_bg_color_var.get(),
+            width=1080,
+            height=920,
+            highlightthickness=0,
+        )
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+
         state_frame = tk.LabelFrame(
             left,
             text="Current State Features (Last Step)",
@@ -227,11 +254,13 @@ class TrainingDashboard:
             bd=1,
             relief="groove",
         )
-        state_frame.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        state_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+        state_frame.rowconfigure(0, weight=1)
+        state_frame.columnconfigure(0, weight=1)
         self.state_text = tk.Text(
             state_frame,
-            height=7,
-            width=130,
+            height=12,
+            width=62,
             bg=self.PANEL_ALT,
             fg=self.TEXT,
             font=("Courier", 9),
@@ -500,7 +529,9 @@ class TrainingDashboard:
             epsilon_start=epsilon_start,
             epsilon_min=epsilon_min,
             epsilon_decay_rate=epsilon_decay_rate,
-            state_encoding=STATE_ENCODING_BOARD,
+            # Preserve currently loaded model encoding so Watch does not rebuild a fresh agent
+            # with a mismatched architecture (e.g., integer12 vs board_cnn).
+            state_encoding=self.cfg.state_encoding,
             step_delay=anim_delay_ms / 1000.0,
         )
 
