@@ -454,9 +454,31 @@ class SnakeDQNAgent:
         if numpy_state is not None:
             np.random.set_state(numpy_state)
         if torch_cpu_state is not None:
-            torch.random.set_rng_state(torch_cpu_state)
+            cpu_state_tensor = torch_cpu_state
+            if not isinstance(cpu_state_tensor, torch.Tensor):
+                cpu_state_tensor = torch.as_tensor(cpu_state_tensor, dtype=torch.uint8)
+            if cpu_state_tensor.dtype != torch.uint8:
+                cpu_state_tensor = cpu_state_tensor.to(dtype=torch.uint8)
+            cpu_state_tensor = cpu_state_tensor.contiguous().view(-1).cpu()
+            try:
+                torch.random.set_rng_state(cpu_state_tensor)
+            except RuntimeError:
+                # Older/newer torch builds may serialize RNG state with incompatible shape/size.
+                # Skip RNG restore instead of failing model/checkpoint loading.
+                pass
         if torch_cuda_state is not None and torch.cuda.is_available():
-            torch.cuda.set_rng_state_all(torch_cuda_state)
+            try:
+                cuda_states: list[torch.Tensor] = []
+                for raw_state in torch_cuda_state:
+                    state_tensor = raw_state
+                    if not isinstance(state_tensor, torch.Tensor):
+                        state_tensor = torch.as_tensor(state_tensor, dtype=torch.uint8)
+                    if state_tensor.dtype != torch.uint8:
+                        state_tensor = state_tensor.to(dtype=torch.uint8)
+                    cuda_states.append(state_tensor.contiguous().view(-1).cpu())
+                torch.cuda.set_rng_state_all(cuda_states)
+            except Exception:
+                pass
 
     def _move_optimizer_state_to_device(self) -> None:
         for state in self.optimizer.state.values():

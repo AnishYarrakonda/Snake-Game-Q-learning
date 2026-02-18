@@ -1,4 +1,4 @@
-# Tkinter training dashboard with live board view + live matplotlib training graph.
+# Tkinter training dashboard with live board view.
 from __future__ import annotations
 
 from collections import deque
@@ -7,16 +7,8 @@ import json
 import os
 import queue
 import threading
-import time
 from typing import Callable
 
-# Keep matplotlib cache local for environments without writable home config.
-LOCAL_MPLCONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mplconfig")
-os.makedirs(LOCAL_MPLCONFIG, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", LOCAL_MPLCONFIG)
-
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox
@@ -34,7 +26,6 @@ try:
         STATE_ENCODING_INTEGER,
         SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
-        chunked_mean,
         default_model_path,
         encode_state,
         make_game,
@@ -54,7 +45,6 @@ except ImportError:
         STATE_ENCODING_INTEGER,
         SUPPORTED_STATE_ENCODINGS,
         TrainConfig,
-        chunked_mean,
         default_model_path,
         encode_state,
         make_game,
@@ -75,7 +65,7 @@ class TrainingDashboard:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Snake DQN Training Dashboard")
-        self.root.geometry("1640x980")
+        self.root.geometry("1760x1060")
         self.root.configure(bg=self.BG_MAIN)
 
         self.msg_queue: queue.Queue[dict] = queue.Queue()
@@ -97,8 +87,7 @@ class TrainingDashboard:
         self.root.after(80, self._poll_queue)
 
     def _build_ui(self) -> None:
-        self.root.columnconfigure(0, weight=3)
-        self.root.columnconfigure(1, weight=2)
+        self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
 
         left = tk.Frame(self.root, bg=self.BG_MAIN)
@@ -106,9 +95,6 @@ class TrainingDashboard:
         left.rowconfigure(2, weight=1)
         left.rowconfigure(3, weight=0)
         left.columnconfigure(0, weight=1)
-
-        right = tk.Frame(self.root, bg=self.BG_MAIN)
-        right.grid(row=0, column=1, sticky="nsew", padx=(0, 12), pady=12)
 
         controls = tk.LabelFrame(
             left,
@@ -228,7 +214,7 @@ class TrainingDashboard:
             anchor="w",
         ).grid(row=1, column=0, sticky="ew", pady=(10, 8))
 
-        self.canvas = tk.Canvas(left, bg=self.board_bg_color_var.get(), width=940, height=760, highlightthickness=0)
+        self.canvas = tk.Canvas(left, bg=self.board_bg_color_var.get(), width=1400, height=900, highlightthickness=0)
         self.canvas.grid(row=2, column=0, sticky="nsew")
         state_frame = tk.LabelFrame(
             left,
@@ -245,7 +231,7 @@ class TrainingDashboard:
         self.state_text = tk.Text(
             state_frame,
             height=7,
-            width=90,
+            width=130,
             bg=self.PANEL_ALT,
             fg=self.TEXT,
             font=("Courier", 9),
@@ -257,13 +243,6 @@ class TrainingDashboard:
         self.state_text.insert("1.0", "State features will appear here during training/watch...")
         self.state_text.config(state="disabled")
 
-        fig = plt.Figure(figsize=(7, 7), dpi=100) #type: ignore
-        self.ax_trend = fig.add_subplot(211)
-        self.ax_hist = fig.add_subplot(212)
-        fig.subplots_adjust(hspace=0.4)
-
-        self.plot_canvas = FigureCanvasTkAgg(fig, master=right)
-        self.plot_canvas.get_tk_widget().pack(fill="both", expand=True)
         self.root.bind("<Control-t>", lambda _e: self.start_training())
         self.root.bind("<Control-w>", lambda _e: self.start_watch())
         self.root.bind("<Control-s>", lambda _e: self.stop_worker())
@@ -646,49 +625,7 @@ class TrainingDashboard:
         self.state_text.config(state="disabled")
 
     def _update_plot(self) -> None:
-        self.ax_trend.clear()
-        self.ax_trend.set_title("Training Trend (Average per 10 Episodes)")
-        self.ax_trend.set_xlabel("Episode")
-        self.ax_trend.set_ylabel("Length")
-        self.ax_trend.grid(alpha=0.25)
-
-        self.ax_hist.clear()
-        self.ax_hist.set_title("Episode Length Distribution")
-        self.ax_hist.set_xlabel("Length")
-        self.ax_hist.set_ylabel("Count")
-        self.ax_hist.grid(alpha=0.2)
-
-        if not self.scores:
-            self.plot_canvas.draw_idle()
-            return
-
-        x10, mean10 = chunked_mean(self.scores, chunk_size=10)
-        if x10.size > 0:
-            self.ax_trend.plot(
-                x10,
-                mean10,
-                color="#1f77b4",
-                linewidth=2.2,
-                marker="o",
-                markersize=3,
-                label="Average length (per 10 episodes)",
-            )
-        handles, labels = self.ax_trend.get_legend_handles_labels()
-        if handles:
-            self.ax_trend.legend(loc="upper left")
-
-        max_score = int(max(self.scores))
-        bins = np.arange(0.5, max_score + 1.5, 1.0)
-        self.ax_hist.hist(self.scores, bins=bins, color="#44b5a4", alpha=0.85, edgecolor="#17323a") #type: ignore
-        mean_all = float(np.mean(self.scores))
-        median_all = float(np.median(self.scores))
-        self.ax_hist.axvline(mean_all, color="#1f77b4", linestyle="--", linewidth=1.6, label=f"Mean: {mean_all:.2f}")
-        self.ax_hist.axvline(median_all, color="#ff7f0e", linestyle="-", linewidth=1.6, label=f"Median: {median_all:.2f}")
-        handles, labels = self.ax_hist.get_legend_handles_labels()
-        if handles:
-            self.ax_hist.legend(loc="upper right")
-
-        self.plot_canvas.draw_idle()
+        return
 
     def _poll_queue(self) -> None:
         try:
@@ -712,7 +649,6 @@ class TrainingDashboard:
                     elapsed_chunk = float(msg.get("elapsed_chunk_sec", 0.0))
 
                     self.scores.append(score)
-                    self._update_plot()
                     self.status_var.set(
                         f"Episode {episode}/{total} | Length: {score:.0f} | Avg10: {avg:.2f} | "
                         f"Epsilon: {epsilon:.4f} | Total: {elapsed_total:.1f}s | Chunk: {elapsed_chunk:.1f}s"
@@ -746,7 +682,6 @@ class TrainingDashboard:
 
     def _clear_series(self) -> None:
         self.scores.clear()
-        self._update_plot()
 
     def start_training(self) -> None:
         messagebox.showinfo(
